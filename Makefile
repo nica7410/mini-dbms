@@ -6,8 +6,8 @@ CC = gcc
 CFLAGS = -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes -O2 -g
 SAN_FLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -O1 -g
 
-SRC = src/common.c src/parser.c src/storage.c src/executor.c
-HDR = src/common.h src/parser.h src/storage.h src/executor.h
+SRC = src/common.c src/parser.c src/storage.c src/executor.c src/bptree.c
+HDR = src/common.h src/parser.h src/storage.h src/executor.h src/bptree.h
 
 ifeq ($(OS),Windows_NT)
   SHELL := cmd.exe
@@ -25,8 +25,9 @@ endif
 
 BIN = build/minidb$(EXE)
 TEST_BIN = build/test_unit$(EXE)
+BENCH_BIN = build/benchmark$(EXE)
 
-.PHONY: all test unit cli sanitize clean
+.PHONY: all test unit cli bench sanitize clean
 
 all: $(BIN)
 
@@ -38,6 +39,12 @@ $(BIN): $(SRC) src/main.c $(HDR) | build
 
 $(TEST_BIN): $(SRC) tests/test_unit.c $(HDR) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ $(SRC) tests/test_unit.c
+
+$(BENCH_BIN): $(SRC) tests/benchmark.c $(HDR) | build
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ $(SRC) tests/benchmark.c
+
+bench: $(BENCH_BIN)
+	$(PYTHON) -c "import subprocess, tempfile; tmp = tempfile.TemporaryDirectory(); result = subprocess.call(['$(BENCH_BIN)', tmp.name]); tmp.cleanup(); raise SystemExit(result)"
 
 test: unit cli
 

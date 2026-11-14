@@ -455,9 +455,12 @@ static void test_storage_max_id(void) {
     Table *t = NULL;
     DbError err = {{0}};
     int64_t id = 0;
+    Collected c = {0};
 
     write_file(dir, data, sizeof data - 1);
     CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_find_id(t, INT64_MAX, collect_row, &c, &err) == 0);
+    CHECK(c.count == 1 && c.ids[0] == INT64_MAX);
     CHECK(table_append(t, "b", 1, &id, &err) == -1);
     CHECK(strstr(err.msg, "ID") != NULL);
     CHECK(table_close(t, &err) == 0);
@@ -660,14 +663,15 @@ static void test_executor_where(void) {
     CHECK(table_close(t, &err) == 0);
 }
 
-static void test_executor_where_scans_whole_file(void) {
-    /* 선형 탐색은 일치하는 행을 찾은 뒤에도 끝까지 읽으므로 뒤쪽 손상도 오류로 보고한다. */
+static void test_executor_select_paths(void) {
+    /* 뒤에 손상된 행이 생긴 경우, ID 조회는 대상 행만 읽고 age 조회는 끝까지 읽는다. */
     const char *dir = fresh_dir("exec_where_corrupt");
     const char good[] = "1\ta\t25\n";
     const char bad[] = "1\ta\t25\n2\tb\n";
     Table *t = NULL;
     DbError err = {{0}};
-    Statement sel = {STMT_SELECT, NULL, 0, WHERE_ID, 1};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25};
+    Collected c = {0};
     char path[600];
     FILE *fp;
 
@@ -681,8 +685,42 @@ static void test_executor_where_scans_whole_file(void) {
         fwrite(bad, 1, sizeof bad - 1, fp);
         fclose(fp);
     }
+    CHECK(select_where(t, WHERE_ID, 1, c.ids) == 1 && c.ids[0] == 1);
+    c.stop_after = 1;
+    CHECK(table_find_id(t, 1, collect_row, &c, &err) == -1 && c.count == 1);
+    CHECK(strstr(err.msg, "조회 결과 처리") != NULL);
     CHECK(executor_run(t, &sel, NULL, &err) == -1);
     CHECK(strstr(err.msg, "2번째 줄") != NULL);
+    CHECK(table_close(t, &err) == 0);
+}
+
+static void test_index_splits_and_reopen(void) {
+    /* 여러 리프와 내부 노드가 분할될 만큼 삽입한다. */
+    enum { ROWS = 6000 };
+    const char *dir = fresh_dir("index_splits");
+    Table *t = NULL;
+    DbError err = {{0}};
+    int64_t id;
+    int64_t ids[8];
+
+    CHECK(table_open(dir, &t, &err) == 0);
+    for (int i = 1; i <= ROWS; i++) {
+        CHECK(table_append(t, i % 2 == 0 ? "김민수" : "abc", i % 151, &id, &err) == 0 && id == i);
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = ROWS; i > 0; i--) {
+            Collected c;
+            c.count = 0;
+            c.stop_after = 0;
+            CHECK(table_find_id(t, i, collect_row, &c, &err) == 0);
+            CHECK(c.count == 1 && c.ids[0] == i && c.ages[0] == i % 151 &&
+                  strcmp(c.names[0], i % 2 == 0 ? "김민수" : "abc") == 0);
+        }
+        CHECK(table_close(t, &err) == 0);
+        CHECK(table_open(dir, &t, &err) == 0);
+    }
+    CHECK(table_append(t, "after reopen", 20, &id, &err) == 0 && id == ROWS + 1);
+    CHECK(select_where(t, WHERE_ID, ROWS + 1, ids) == 1 && ids[0] == ROWS + 1);
     CHECK(table_close(t, &err) == 0);
 }
 
@@ -719,7 +757,8 @@ int main(int argc, char **argv) {
     test_executor_validation();
     test_executor_insert_select();
     test_executor_where();
-    test_executor_where_scans_whole_file();
+    test_executor_select_paths();
+    test_index_splits_and_reopen();
 
     printf("단위 테스트: %d개 검사 중 %d개 실패\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

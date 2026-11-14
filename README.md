@@ -1,17 +1,15 @@
-# 미니 DBMS — Phase 1
+# 미니 DBMS — Phase 2
 
-C로 SQL 파일을 실행하고 데이터를 파일에 저장하는 CLI를 만든다.
+C17로 구현한 SQL CLI다. 레코드는 TSV 파일에 저장하고, ID 조회는 메모리 B+ 트리로 처리한다.
 
-## 읽는 순서
+## Phase 1 문서
 
 1. [개발 명세](docs/spec.md): 무엇을 만들고 어떻게 확인하는가
 2. [설계와 결정](docs/design.md): 처리 흐름, 저장 방식, 구현 전 결정
 3. [작업 목록](docs/tasks.md): 구현 단위와 검증 기준
 4. [구현설명서](docs/implementation.md): 전체 흐름에서 INSERT·SELECT 코드 따라가기
 
-현재 상태: **Phase 1 구현·테스트 완료(DB-P1-01, DB-P1-C01 SQL 주석, DB-P1-02 조건 조회), DB-P1-02 Codex 검증 대기.**
-
-지원 SQL: `INSERT INTO users (name, age) VALUES (...)`, `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `--`·`/* */` 주석. 조건 조회는 선형 탐색이다.
+지원 SQL은 `INSERT INTO users (name, age) VALUES (...)`, `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `--`·`/* */` 주석이다.
 
 ## 빌드와 실행 (Windows, TDM-GCC)
 
@@ -35,19 +33,38 @@ id	name	age
 docker run --rm -v "%cd%:/src" -w /src gcc:13 make sanitize
 ```
 
+## B+ 트리 인덱스
+
+[Phase 2 구현설명서](docs/implementation-phase2.md)
+
+- 테이블을 열 때 `users.tsv` 전체를 한 번 읽어 레코드를 검증하고, 리프에 `ID → 레코드 시작 바이트 위치`를 등록한다. TSV는 Phase 1과 같은 형식을 사용한다.
+- INSERT는 최대 ID에 1을 더한다. 인덱스 공간을 먼저 확보하고 TSV 쓰기가 성공하면 새 ID와 위치를 등록한다. 증가 순서로 들어오는 ID는 항상 가장 오른쪽 리프에 추가된다.
+- 리프가 가득 차면 둘로 나누고, 오른쪽 리프의 첫 키를 부모의 경계 키로 올린다. 내부 노드도 가득 차면 분할되며, 루트가 분할되면 트리의 높이가 한 단계 늘어난다.
+- `WHERE id = ...`는 경계 키로 트리를 내려가 리프의 위치를 찾은 뒤 해당 행만 읽는다. ID가 없으면 데이터 파일을 읽을 필요가 없다. `WHERE age = ...`와 전체 조회는 TSV를 순차 탐색한다.
+- 테이블은 단일 프로세스에서 사용한다. 열린 테이블의 파일을 외부에서 수정하면 인덱스의 바이트 위치가 유효하지 않을 수 있다.
+
+## 100만 건 성능 비교
+
+Windows에서 `mingw32-make bench`, Linux에서 `make bench`를 실행한다. 매번 임시 데이터 디렉터리에서 기존 SQL 파서와 실행기로 INSERT 100만 건을 실행한다. 테이블을 다시 연 뒤 두 SELECT가 같은 한 행을 반환하는지 검증한다.
+
+| 항목 | 측정값 |
+|---|---:|
+| SQL INSERT 1,000,000건 | 7.748초 |
+| 테이블 재열기 및 인덱스 재구축 | 0.313초 |
+| `WHERE id = 500000` B+ 트리, 100,000회 평균 | 2.454 µs |
+| `WHERE age = 150` 순차 탐색, 10회 평균 | 303.132 ms |
+
+Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측정했다. 조회 시간은 각 쿼리를 한 번 예열한 후 같은 테이블에서 반복한 평균이다. 쿼리 파싱, CLI 출력, 테이블 재열기 시간은 조회 측정에서 제외했다. CLI를 매번 새로 실행하면 인덱스 재구축 시간도 포함된다.
+
 ## 코드 구성
 
 | 파일 | 역할 |
 |---|---|
 | src/main.c | CLI: 인자·SQL 파일 읽기, 문장 순차 실행, 결과·오류 출력, 종료 코드 |
 | src/parser.c | Lexer + 재귀 하강 파서: SQL 텍스트 → Statement |
-| src/executor.c | 값 검증 후 Storage에 저장·조회 요청. WHERE는 조회 콜백 앞의 필터로 검사, 결과는 콜백으로 전달 |
-| src/storage.c | users.tsv 열기·검증·순차 읽기·추가, 다음 ID 복원 |
-| tests/test_unit.c | Parser·Storage·Executor 단위 테스트 |
+| src/executor.c | 값 검증, ID 인덱스 조회와 순차 탐색 선택, 결과 콜백 전달 |
+| src/storage.c | TSV 검증·읽기·추가, 다음 ID와 인덱스 관리 |
+| src/bptree.c | 리프·내부 노드 분할과 ID 조회 |
+| tests/test_unit.c | Parser·Storage·Executor 단위 테스트, 노드 분할과 재구축 검증 |
 | tests/cli_test.py | 실제 프로세스를 실행하는 CLI 통합 테스트 |
-
-이 폴더의 docs/를 DBMS 구현 기준으로 사용한다.
-
-## 구현 담당에게 전달할 내용
-
-> 위 세 문서를 읽고 미정 결정을 먼저 확인한다. 결정 후 DB-P1-01(기본 저장·조회)만 구현하고 단위·CLI 통합 테스트를 실행한다. DB-P1-02(조건 검색·전체 검증)는 1단위 PASS 후 사용자가 진행을 지시하면 시작한다. Codex 검증을 기다리며 멈춘다. 함수별 학습 노트 대신 전체 흐름과 실행 예시를 설명한다. Phase 2·3과 선택 기능은 시작하지 않는다. 커밋·푸시는 사용자 지시 후 현재 작업 브랜치에서만 한다.
+| tests/benchmark.c | SQL INSERT 100만 건과 ID·age 조회 성능 측정 |

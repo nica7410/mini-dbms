@@ -350,7 +350,7 @@ def a7_data_file_is_directory(env):
 
 @test
 def a7_corrupted_line_after_match_still_fails(env):
-    # 선형 탐색은 일치 행을 찾은 뒤에도 끝까지 읽어 뒤쪽 손상을 보고한다.
+    # 인덱스를 재구축하는 테이블 열기 단계에서 뒤쪽 손상도 보고한다.
     os.makedirs(env.data_dir)
     with open(env.data_file, "wb") as f:
         f.write(b"1\ta\t25\n2\tb\t30\n3\tc\n")
