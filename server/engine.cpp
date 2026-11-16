@@ -58,6 +58,23 @@ TableHandle open_table(const std::string& directory) {
     return TableHandle(raw);
 }
 
+struct ReaderDeleter {
+    void operator()(TableReader* reader) const noexcept {
+        if (reader != nullptr) (void)table_reader_close(reader, nullptr);
+    }
+};
+
+using ReaderHandle = std::unique_ptr<TableReader, ReaderDeleter>;
+
+ReaderHandle open_reader(Table* table) {
+    TableReader* raw = nullptr;
+    DbError error{};
+    if (table_reader_open(table, &raw, &error) != 0) {
+        throw std::runtime_error(error.msg);
+    }
+    return ReaderHandle(raw);
+}
+
 struct StatementOwner {
     Statement statement{};
     ~StatementOwner() { statement_free(&statement); }
@@ -77,8 +94,6 @@ struct Metrics {
     std::atomic<std::uint64_t> successful_inserts{0};
     std::atomic<std::uint64_t> successful_selects{0};
     std::atomic<std::uint64_t> errors{0};
-    std::atomic<std::uint64_t> fallbacks{0};
-    std::atomic<std::uint64_t> fallbacks_skipped{0};
     std::atomic<std::uint64_t> current_executions{0};
     std::atomic<std::uint64_t> peak_executions{0};
     std::atomic<std::uint64_t> lock_wait_us{0};
@@ -136,14 +151,12 @@ struct RowCollector {
     QueryResult& result;
     const EngineOptions& options;
     std::size_t bytes = 256;
-    std::size_t calls = 0;
     CollectionFailure failure = CollectionFailure::None;
 };
 
 extern "C" {
 static int collect_row(const Row* row, void* opaque) noexcept {
     auto& collector = *static_cast<RowCollector*>(opaque);
-    ++collector.calls;
     std::size_t escaped = 0;
     for (const auto* p = reinterpret_cast<const unsigned char*>(row->name); *p != 0; ++p) {
         escaped += *p < 0x20 ? 6 : (*p == '"' || *p == '\\' ? 2 : 1);
@@ -170,9 +183,12 @@ static int collect_row(const Row* row, void* opaque) noexcept {
 } // namespace
 
 struct Engine::Impl {
+    // A worker's own file cursor over the shared Table. The B+ tree index is
+    // shared: it is read only under the shared gate and changed only by INSERT
+    // under the exclusive gate.
     struct Reader {
-        explicit Reader(const std::string& directory) : table(open_table(directory)) {}
-        TableHandle table;
+        explicit Reader(Table* shared) : handle(open_reader(shared)) {}
+        ReaderHandle handle;
         std::mutex mutex;
     };
 
@@ -184,16 +200,21 @@ struct Engine::Impl {
             options.max_rows == 0 || options.max_result_bytes == 0) {
             throw std::invalid_argument("engine reader count and limits must be positive");
         }
-        writer = open_table(options.data_dir);
+        table = open_table(options.data_dir);
         readers.reserve(options.readers);
         for (std::size_t i = 0; i < options.readers; ++i) {
-            readers.push_back(std::make_unique<Reader>(options.data_dir));
+            readers.push_back(std::make_unique<Reader>(table.get()));
         }
     }
 
-    int run_c(Table* table, const Statement& statement, const ResultSink& sink, DbError& error) {
+    int run_insert(const Statement& statement, const ResultSink& sink, DbError& error) {
         ExecutionScope execution(metrics);
-        return executor_run(table, &statement, &sink, &error);
+        return executor_run(table.get(), &statement, &sink, &error);
+    }
+
+    int run_select(Reader& reader, const Statement& statement, const ResultSink& sink, DbError& error) {
+        ExecutionScope execution(metrics);
+        return executor_run_read(reader.handle.get(), &statement, &sink, &error);
     }
 
     void add_wait(Clock::time_point started, LockKind kind) noexcept {
@@ -205,15 +226,6 @@ struct Engine::Impl {
         while (maximum < elapsed && !metric.max_us.compare_exchange_weak(
                    maximum, elapsed, std::memory_order_relaxed)) {}
         metrics.lock_wait_us.fetch_add(elapsed, std::memory_order_relaxed);
-    }
-
-    // Startup indexes cover old rows. Only successful post-startup INSERTs can
-    // add rows missing from a reader snapshot. Read both bounds under the shared
-    // gate: separate atomic loads alone would not guarantee a consistent range.
-    bool may_be_inserted_since_startup(std::int64_t id) const noexcept {
-        const auto first = first_insert_id.load(std::memory_order_acquire);
-        const auto last = last_insert_id.load(std::memory_order_acquire);
-        return first != 0 && id >= first && id <= last;
     }
 
     bool available(QueryResult& result) const {
@@ -228,7 +240,6 @@ struct Engine::Impl {
         } else if (collector.failure == CollectionFailure::Allocation) {
             fail(collector.result, QueryStatus::InternalError, "unable to allocate query results");
         } else if (rc != 0) {
-            // A genuine reader error is never treated as a stale-index miss.
             is_healthy.store(false, std::memory_order_release);
             fail(collector.result, QueryStatus::StorageError, error.msg);
         } else {
@@ -283,20 +294,11 @@ struct Engine::Impl {
             auto wait_started = Clock::now();
             std::unique_lock<EngineGate> write_gate(gate);
             add_wait(wait_started, LockKind::WriteGate);
-            wait_started = Clock::now();
-            std::unique_lock<std::mutex> writer_lock(writer_mutex);
-            add_wait(wait_started, LockKind::InsertWriterMutex);
             if (!available(result)) return;
 
             const ResultSink sink{record_insert, nullptr, &result};
-            const int rc = run_c(writer.get(), statement, sink, error);
+            const int rc = run_insert(statement, sink, error);
             if (rc == 0) {
-                // The exclusive gate serializes INSERTs, so check-then-store is
-                // race-free. Readers observe it under the shared gate.
-                if (first_insert_id.load(std::memory_order_relaxed) == 0) {
-                    first_insert_id.store(result.inserted_id, std::memory_order_release);
-                }
-                last_insert_id.store(result.inserted_id, std::memory_order_release);
                 result.status = QueryStatus::Ok;
                 return;
             }
@@ -305,7 +307,7 @@ struct Engine::Impl {
             // first, then misses in the index without touching the FILE cursor.
             // It exposes write_failed, not general file health or commit status.
             DbError health_error{};
-            if (table_find_id(writer.get(), 0, nullptr, nullptr, &health_error) != 0) {
+            if (table_find_id(table.get(), 0, nullptr, nullptr, &health_error) != 0) {
                 is_healthy.store(false, std::memory_order_release);
             }
             fail(result, QueryStatus::StorageError, error.msg);
@@ -327,25 +329,8 @@ struct Engine::Impl {
 
         RowCollector collector{result, options};
         const ResultSink sink{nullptr, collect_row, &collector};
-        int rc = run_c(reader.table.get(), statement, sink, error);
-        if (rc == 0 && statement.where == WHERE_ID && collector.calls == 0) {
-            if (!may_be_inserted_since_startup(statement.where_value)) {
-                // The miss is final: this ID cannot have been added after the
-                // reader index was built, so the writer index would miss too.
-                metrics.fallbacks_skipped.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                // Reader indexes are immutable snapshots. An append cannot
-                // invalidate their hits; a miss on a possibly new ID must consult
-                // the authoritative writer index.
-                // Always take locks in gate -> writer_mutex order.
-                wait_started = Clock::now();
-                std::unique_lock<std::mutex> writer_lock(writer_mutex);
-                add_wait(wait_started, LockKind::FallbackMutex);
-                if (!available(result)) return;
-                metrics.fallbacks.fetch_add(1, std::memory_order_relaxed);
-                rc = run_c(writer.get(), statement, sink, error);
-            }
-        }
+        // The shared index is always current, so a miss is final.
+        const int rc = run_select(reader, statement, sink, error);
         finish_select(rc, collector, error);
     }
 
@@ -369,15 +354,11 @@ struct Engine::Impl {
     }
 
     EngineOptions options;
-    TableHandle writer;
+    // Declared before readers so every reader closes before the Table.
+    TableHandle table;
     std::vector<std::unique_ptr<Reader>> readers;
     EngineGate gate;
-    std::mutex writer_mutex;
     std::atomic<bool> is_healthy{true};
-    // Inclusive successful INSERT range since construction; both 0 until then.
-    // Updated together under the exclusive gate, read under the shared gate.
-    std::atomic<std::int64_t> first_insert_id{0};
-    std::atomic<std::int64_t> last_insert_id{0};
     Metrics metrics;
 };
 
@@ -405,8 +386,6 @@ EngineStats Engine::stats() const {
     out.successful_inserts = metrics.successful_inserts.load(std::memory_order_relaxed);
     out.successful_selects = metrics.successful_selects.load(std::memory_order_relaxed);
     out.errors = metrics.errors.load(std::memory_order_relaxed);
-    out.fallbacks = metrics.fallbacks.load(std::memory_order_relaxed);
-    out.fallbacks_skipped = metrics.fallbacks_skipped.load(std::memory_order_relaxed);
     out.current_executions = metrics.current_executions.load(std::memory_order_relaxed);
     out.peak_executions = metrics.peak_executions.load(std::memory_order_relaxed);
     out.lock_wait_us = metrics.lock_wait_us.load(std::memory_order_relaxed);

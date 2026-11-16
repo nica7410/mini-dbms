@@ -46,7 +46,7 @@ struct EngineOptions {
 };
 
 enum class LockKind : std::size_t {
-    ReaderMutex, ReadGate, WriteGate, InsertWriterMutex, FallbackMutex, Count
+    ReaderMutex, ReadGate, WriteGate, Count
 };
 
 struct LockWaitStats {
@@ -60,11 +60,7 @@ struct EngineStats {
     std::uint64_t successful_inserts = 0;
     std::uint64_t successful_selects = 0;
     std::uint64_t errors = 0;
-    std::uint64_t fallbacks = 0;
-    // Reader ID misses outside the successful post-startup INSERT range (or
-    // before any INSERT), answered without consulting the writer.
-    std::uint64_t fallbacks_skipped = 0;
-    // These count executor_run calls, excluding parsing and lock waiting.
+    // These count C executor calls (INSERT and SELECT), excluding parsing and lock waiting.
     std::uint64_t current_executions = 0;
     std::uint64_t peak_executions = 0;
     std::uint64_t lock_wait_us = 0;

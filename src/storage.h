@@ -41,4 +41,21 @@ int table_find_id(Table *t, int64_t id, RowFn fn, void *ctx, DbError *err);
 /* 파일을 닫고 메모리를 해제한다. 실패해도 t는 해제된다. t가 NULL이면 0. */
 int table_close(Table *t, DbError *err);
 
+/*
+ * TableReader: 같은 Table의 ID 인덱스를 공유하면서 파일 위치만 따로 갖는 읽기 핸들.
+ * 여러 스레드가 각자 reader로 동시에 읽을 수 있게 하려는 것이다.
+ * - reader는 Table보다 먼저 닫아야 한다.
+ * - 한 reader를 여러 스레드가 동시에 쓰면 안 된다.
+ * - 인덱스를 공유하므로 reader 조회와 table_append가 동시에 실행되면 안 된다.
+ *   (읽기끼리는 동시에 실행해도 된다. 동기화는 호출자가 맡는다.)
+ * 조회 규칙과 반환값은 table_scan / table_find_id와 같다.
+ */
+typedef struct TableReader TableReader;
+
+int table_reader_open(Table *t, TableReader **out, DbError *err);
+int table_reader_scan(TableReader *r, RowFn fn, void *ctx, DbError *err);
+int table_reader_find_id(TableReader *r, int64_t id, RowFn fn, void *ctx, DbError *err);
+/* 파일을 닫고 메모리를 해제한다. 실패해도 r은 해제된다. r이 NULL이면 0. */
+int table_reader_close(TableReader *r, DbError *err);
+
 #endif

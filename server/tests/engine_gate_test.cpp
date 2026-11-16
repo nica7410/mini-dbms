@@ -12,13 +12,21 @@ Event scan_entered, release_scan, insert_entered;
 std::atomic<bool> intercept_scan{true};
 }
 
-extern "C" int __real_executor_run(Table*, const Statement*, const ResultSink*, DbError*);
-extern "C" int __wrap_executor_run(Table* table, const Statement* statement,
-                                   const ResultSink* sink, DbError* error) {
-    if (statement->kind == STMT_SELECT && statement->where == WHERE_NONE && intercept_scan.exchange(false)) {
+// SELECT runs through executor_run_read (worker reader handle), INSERT through
+// executor_run (shared Table). Hold the first scan inside the C call.
+extern "C" int __real_executor_run_read(TableReader*, const Statement*, const ResultSink*, DbError*);
+extern "C" int __wrap_executor_run_read(TableReader* reader, const Statement* statement,
+                                        const ResultSink* sink, DbError* error) {
+    if (statement->where == WHERE_NONE && intercept_scan.exchange(false)) {
         scan_entered.set();
         release_scan.wait();
     }
+    return __real_executor_run_read(reader, statement, sink, error);
+}
+
+extern "C" int __real_executor_run(Table*, const Statement*, const ResultSink*, DbError*);
+extern "C" int __wrap_executor_run(Table* table, const Statement* statement,
+                                   const ResultSink* sink, DbError* error) {
     if (statement->kind == STMT_INSERT) insert_entered.set();
     return __real_executor_run(table, statement, sink, error);
 }

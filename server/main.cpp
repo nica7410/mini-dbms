@@ -398,12 +398,12 @@ int serve(const Options &options) {
         db["successful_inserts"] = Json::UInt64(database.successful_inserts);
         db["successful_selects"] = Json::UInt64(database.successful_selects);
         db["errors"] = Json::UInt64(database.errors);
-        db["fallbacks"] = Json::UInt64(database.fallbacks);
-        db["fallbacks_skipped"] = Json::UInt64(database.fallbacks_skipped);
         db["current_executions"] = Json::UInt64(database.current_executions);
         db["peak_executions"] = Json::UInt64(database.peak_executions);
         db["lock_wait_us"] = Json::UInt64(database.lock_wait_us);
-        const char* lock_names[] = {"reader_mutex", "read_gate", "write_gate", "insert_writer_mutex", "fallback_mutex"};
+        const char* lock_names[] = {"reader_mutex", "read_gate", "write_gate"};
+        static_assert(sizeof lock_names / sizeof lock_names[0] == static_cast<std::size_t>(minidb::LockKind::Count),
+                      "every LockKind needs a /metrics name");
         for (std::size_t i = 0; i < database.lock_wait.size(); ++i) {
             const auto& metric = database.lock_wait[i];
             auto& detail = db["lock_wait"][lock_names[i]];

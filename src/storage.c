@@ -40,6 +40,12 @@ struct Table {
     bool write_failed;
 };
 
+/* 같은 Table의 인덱스를 공유하고, 파일 위치만 따로 갖는 읽기 핸들. */
+struct TableReader {
+    Table *table;
+    FILE *fp; /* "rb": 읽기 전에 항상 위치를 다시 잡는다 */
+};
+
 /* ---------- 레코드 읽기 ---------- */
 
 /* 1: 한 줄 읽음(LF 제외), 0: 파일 끝, -1: 형식 손상(*why 설정), -2: 읽기 오류 */
@@ -157,13 +163,14 @@ static BPTreeNode *reserve_index_entry(Table *t, DbError *err) {
     return leaf;
 }
 
-static int scan_rows(Table *t, RowFn fn, void *ctx, bool build_index, DbError *err) {
+/* fp는 t->fp 또는 TableReader의 핸들이다. 위치를 처음으로 옮겨 버퍼와 EOF 상태를 비운다. */
+static int scan_rows(Table *t, FILE *fp, RowFn fn, void *ctx, bool build_index, DbError *err) {
     char line[LINE_CAP];
     int64_t lineno = 0;
     int64_t offset = 0;
     int64_t prev_id = 0;
 
-    if (file_seek(t->fp, 0, SEEK_SET) != 0) {
+    if (file_seek(fp, 0, SEEK_SET) != 0) {
         db_error_set(err, "데이터 파일 읽기 준비 실패: %s (%s)", t->path, strerror(errno));
         return -1;
     }
@@ -171,7 +178,7 @@ static int scan_rows(Table *t, RowFn fn, void *ctx, bool build_index, DbError *e
         Row row;
         size_t len;
         const char *why = NULL;
-        int r = read_row(t->fp, line, &len, prev_id, &row, &why);
+        int r = read_row(fp, line, &len, prev_id, &row, &why);
 
         if (r == 0) {
             break;
@@ -213,6 +220,42 @@ static bool table_usable(Table *t, DbError *err) {
     return true;
 }
 
+/* 인덱스로 위치를 찾아 fp에서 한 행을 읽는다. 없으면 0. */
+static int find_id_rows(Table *t, FILE *fp, int64_t id, RowFn fn, void *ctx, DbError *err) {
+    int64_t offset;
+    char line[LINE_CAP];
+    size_t len;
+    Row row;
+    const char *why = NULL;
+    int r;
+
+    if (!table_usable(t, err)) {
+        return -1;
+    }
+    if (!bptree_find(&t->index, id, &offset)) {
+        return 0;
+    }
+    if (file_seek(fp, offset, SEEK_SET) != 0) {
+        db_error_set(err, "데이터 파일 읽기 준비 실패: %s (%s)", t->path, strerror(errno));
+        return -1;
+    }
+    r = read_row(fp, line, &len, 0, &row, &why);
+    if (r == -2) {
+        db_error_set(err, "데이터 파일 읽기 실패: %s", t->path);
+        return -1;
+    }
+    if (r != 1 || row.id != id) {
+        db_error_set(err, "데이터 파일 손상: %s %" PRId64 " 바이트 위치: %s",
+                     t->path, offset, why != NULL ? why : "ID 인덱스와 일치하는 행이 없습니다");
+        return -1;
+    }
+    if (fn != NULL && fn(&row, ctx) != 0) {
+        db_error_set(err, "조회 결과 처리에 실패했습니다");
+        return -1;
+    }
+    return 0;
+}
+
 /* ---------- 공개 함수 ---------- */
 
 int table_open(const char *data_dir, Table **out, DbError *err) {
@@ -248,7 +291,7 @@ int table_open(const char *data_dir, Table **out, DbError *err) {
     }
 
     /* 시작할 때 한 번만 전체를 검증하며 인덱스와 최대 ID를 복원한다. */
-    if (scan_rows(t, NULL, NULL, true, err) != 0) {
+    if (scan_rows(t, t->fp, NULL, NULL, true, err) != 0) {
         goto fail;
     }
     *out = t;
@@ -268,42 +311,56 @@ int table_scan(Table *t, RowFn fn, void *ctx, DbError *err) {
     if (!table_usable(t, err)) {
         return -1;
     }
-    return scan_rows(t, fn, ctx, false, err);
+    return scan_rows(t, t->fp, fn, ctx, false, err);
 }
 
 int table_find_id(Table *t, int64_t id, RowFn fn, void *ctx, DbError *err) {
-    int64_t offset;
-    char line[LINE_CAP];
-    size_t len;
-    Row row;
-    const char *why = NULL;
-    int r;
+    return find_id_rows(t, t->fp, id, fn, ctx, err);
+}
 
-    if (!table_usable(t, err)) {
+int table_reader_open(Table *t, TableReader **out, DbError *err) {
+    TableReader *r;
+
+    *out = NULL;
+    r = calloc(1, sizeof *r);
+    if (r == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
         return -1;
     }
-    if (!bptree_find(&t->index, id, &offset)) {
+    r->table = t;
+    r->fp = fopen(t->path, "rb");
+    if (r->fp == NULL) {
+        db_error_set(err, "데이터 파일을 읽기용으로 열 수 없습니다: %s (%s)", t->path, strerror(errno));
+        free(r);
+        return -1;
+    }
+    *out = r;
+    return 0;
+}
+
+int table_reader_scan(TableReader *r, RowFn fn, void *ctx, DbError *err) {
+    if (!table_usable(r->table, err)) {
+        return -1;
+    }
+    return scan_rows(r->table, r->fp, fn, ctx, false, err);
+}
+
+int table_reader_find_id(TableReader *r, int64_t id, RowFn fn, void *ctx, DbError *err) {
+    return find_id_rows(r->table, r->fp, id, fn, ctx, err);
+}
+
+int table_reader_close(TableReader *r, DbError *err) {
+    int rc;
+
+    if (r == NULL) {
         return 0;
     }
-    if (file_seek(t->fp, offset, SEEK_SET) != 0) {
-        db_error_set(err, "데이터 파일 읽기 준비 실패: %s (%s)", t->path, strerror(errno));
-        return -1;
+    rc = fclose(r->fp);
+    if (rc != 0) {
+        db_error_set(err, "데이터 파일 닫기 실패: %s (%s)", r->table->path, strerror(errno));
     }
-    r = read_row(t->fp, line, &len, 0, &row, &why);
-    if (r == -2) {
-        db_error_set(err, "데이터 파일 읽기 실패: %s", t->path);
-        return -1;
-    }
-    if (r != 1 || row.id != id) {
-        db_error_set(err, "데이터 파일 손상: %s %" PRId64 " 바이트 위치: %s",
-                     t->path, offset, why != NULL ? why : "ID 인덱스와 일치하는 행이 없습니다");
-        return -1;
-    }
-    if (fn != NULL && fn(&row, ctx) != 0) {
-        db_error_set(err, "조회 결과 처리에 실패했습니다");
-        return -1;
-    }
-    return 0;
+    free(r);
+    return rc == 0 ? 0 : -1;
 }
 
 int table_append(Table *t, const char *name, int age, int64_t *out_id, DbError *err) {

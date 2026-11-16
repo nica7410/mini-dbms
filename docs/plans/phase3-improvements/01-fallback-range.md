@@ -1,6 +1,6 @@
 # 1. 성공 INSERT 범위로 fallback 제한
 
-상태: 구현·Release 검증 완료(2026-11-16, 미커밋). TSan은 [05 최소 검증](05-minimal-verification.md)에서 통과했다.  
+상태: [06 단일 인덱스](06-single-index.md)로 대체됨 — 재조회 장치 자체가 삭제됐다. 아래 내용은 이전 구조의 기록이다.  
 기존 논의: 2번  
 선행 작업: 없음  
 다음 작업: [동시성 검증 보강](02-concurrency-tests.md)

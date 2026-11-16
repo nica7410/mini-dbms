@@ -177,16 +177,16 @@ HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한�
 
 ## 병렬 처리와 제한
 
-- 서로 다른 reader 컨텍스트의 SELECT는 병렬로 실행할 수 있다. 같은 `FILE*`를 여러 thread가 공유하지 않는다.
-- INSERT는 한 writer 컨텍스트에서 직렬화하며, INSERT 실행 중에는 SELECT를 실행하지 않는다.
-- reader의 B+ 트리는 서버 시작 시점의 인덱스다. ID 조회가 정상적으로 끝났지만 행을 찾지 못한 경우, 시작 이후 성공한 INSERT가 아직 없거나 조회 ID가 성공 INSERT 범위(`first_insert_id` 이상, `last_insert_id` 이하) 밖이면 재조회 없이 빈 결과를 반환한다. 범위 안의 miss만 writer 인덱스에 재조회하며, 이 재조회는 writer mutex를 공유한다. 실패한 INSERT는 범위를 바꾸지 않으며, 재시작하면 이전 행들이 reader 인덱스에 포함되고 범위는 초기화된다.
-- worker가 `W`개면 writer를 포함하여 `W + 1`개의 테이블 컨텍스트와 인덱스를 구축한다. worker를 늘리면 초기화 시간과 메모리도 늘어난다.
+- SELECT는 worker마다 따로 연 읽기 핸들(`TableReader`)로 실행하므로 병렬로 실행할 수 있다. 같은 `FILE*`를 여러 thread가 공유하지 않는다.
+- B+ 트리 인덱스는 하나를 모든 worker가 공유한다. 공유 gate 아래에서만 읽고, INSERT의 배타 gate 아래에서만 바뀐다. 그래서 INSERT 직후 어느 worker에서 조회해도 새 행이 바로 보인다.
+- INSERT는 직렬화하며, INSERT 실행 중에는 SELECT를 실행하지 않는다.
+- 인덱스는 시작할 때 한 번만 구축한다. worker 수를 늘려도 인덱스 메모리와 시작 시간은 늘지 않는다.
 - 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, UPDATE/DELETE, 페이지네이션은 제공하지 않는다.
 - TSV 쓰기는 기존 엔진의 `fflush` 계약을 사용한다. WAL·`fsync`·crash recovery를 추가한 것은 아니다.
 
-Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다. 새 ID 조회의 fallback, 긴 순차 탐색, 메모리 복제, 쓰기 비중과 저장 장치가 성능에 영향을 준다. `peak_active`는 worker 활동 수이고, `engine.peak_executions`는 기존 `executor_run`의 동시 진입 수다. 어느 값도 단독으로 속도 향상을 증명하지 않는다.
+Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다. 긴 순차 탐색, 쓰기 비중과 저장 장치가 성능에 영향을 준다. `peak_active`는 worker 활동 수이고, `engine.peak_executions`는 C executor(`executor_run`, `executor_run_read`)의 동시 진입 수다. 어느 값도 단독으로 속도 향상을 증명하지 않는다.
 
-`/metrics`의 `engine.lock_wait`는 `reader_mutex`, `read_gate`, `write_gate`, `insert_writer_mutex`, `fallback_mutex`별 `count`, `total_us`, `max_us`를 제공한다. count는 경합 여부와 무관한 성공 획득 횟수이며 시간은 잠금 보유 시간을 제외한다. 기존 `engine.lock_wait_us`는 전체 합계로 유지한다. 요청 p95/p99는 이 합계에서 계산할 수 없으며, [부하 생성기](benchmarks/README.md)로 클라이언트 지연을 측정한다.
+`/metrics`의 `engine.lock_wait`는 `reader_mutex`, `read_gate`, `write_gate`별 `count`, `total_us`, `max_us`를 제공한다. count는 경합 여부와 무관한 성공 획득 횟수이며 시간은 잠금 보유 시간을 제외한다. 기존 `engine.lock_wait_us`는 전체 합계로 유지한다. 요청 p95/p99는 이 합계에서 계산할 수 없으며, [부하 생성기](benchmarks/README.md)로 클라이언트 지연을 측정한다.
 
 ## 종료
 

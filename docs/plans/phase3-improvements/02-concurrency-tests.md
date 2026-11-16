@@ -1,6 +1,6 @@
 # 2. 동시성 순서와 서버 종료 연결 검증
 
-상태: 구현·Release 검증 완료(2026-11-16, 미커밋)  
+상태: 완료(커밋 1477e83). TSan은 [05 최소 검증](05-minimal-verification.md)에서 통과했다.  
 기존 논의: 1번  
 선행 작업: [fallback 범위 제한](01-fallback-range.md)  
 다음 작업: [지표와 성능 비교](03-metrics-and-benchmarks.md)

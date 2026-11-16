@@ -2,9 +2,15 @@
 
 ## 1. 구현 범위와 빌드 경계
 
-Phase 3는 기존 `src/common.c`, `parser.c`, `storage.c`, `executor.c`, `bptree.c`를 수정하지 않고 C17 static library인 `minidb_core`로 빌드한다. 기존 CLI의 `src/main.c`는 서버에 링크하지 않는다. C++17 서버는 별도 `server/` 디렉터리에서 빌드한다.
+Phase 3는 기존 `src/common.c`, `parser.c`, `storage.c`, `executor.c`, `bptree.c`를 C17 static library인 `minidb_core`로 빌드한다. 기존 CLI의 `src/main.c`는 서버에 링크하지 않는다. C++17 서버는 별도 `server/` 디렉터리에서 빌드한다.
 
-`server/c_api.hpp`가 기존 헤더를 `extern "C"`로 감싼다. 이는 C++ 호출자의 링크 이름을 C 함수 이름과 맞추는 역할이며, C 코드에 동기화를 추가하거나 C++ 코드로 다시 컴파일하는 기능은 아니다.
+C 엔진에는 서버의 병렬 조회를 위해 읽기 함수만 추가했다([계획 06](plans/phase3-improvements/06-single-index.md)).
+- `storage.h`: `TableReader`, `table_reader_open`, `table_reader_scan`, `table_reader_find_id`, `table_reader_close`
+- `executor.h`: `executor_run_read`
+
+기존 공개 함수와 CLI의 동작은 바꾸지 않았다. 기존 `table_scan`과 `table_find_id`는 새 함수와 같은 내부 코드를 쓰는 wrapper가 됐다. 기존 C 검사·CLI 테스트·ASan/UBSan이 그대로 통과한다.
+
+`server/c_api.hpp`가 기존 헤더를 `extern "C"`로 감싼다. 이는 C++ 호출자의 링크 이름을 C 함수 이름과 맞추는 역할이며, C 코드에 동기화를 추가하거나 C++ 코드로 다시 컴파일하는 기능은 아니다. 동기화는 C++ adapter가 맡는다.
 
 | 파일 | 책임 |
 |---|---|
@@ -29,9 +35,9 @@ flowchart TD
     Queue --> Workers["고정 SQL workers"]
     Workers --> Parse["기존 C Parser"]
     Parse --> Gate["C++ 동시성 제어"]
-    Gate --> Readers["worker별 reader"]
-    Gate --> Writer["단일 writer"]
-    Readers --> CRead["기존 C Executor·Storage·B+ 트리"]
+    Gate --> Readers["SELECT: worker별 TableReader(파일 핸들)"]
+    Gate --> Writer["INSERT: 공유 Table"]
+    Readers --> CRead["C Executor·Storage·공유 B+ 트리"]
     Writer --> CRead
     CRead --> Result["소유권을 가진 결과 복사"]
     Result --> JSON["JSON 생성·응답 callback"]
@@ -42,45 +48,45 @@ HTTP handler는 요청을 검사하고 작업을 제출한 뒤 반환한다. 기
 
 작업은 SQL 문자열과 응답 callback을 값으로 소유한다. HTTP handler의 지역 변수나 요청 내부 문자열을 참조로 저장하지 않는다. 엔진과 pool 등 서버 수명 객체는 작업이 모두 끝날 때까지 살아 있다.
 
-## 3. 변경하지 않은 C 엔진의 공유 상태 다루기
+## 3. C 엔진의 공유 상태 다루기
 
-기존 `Table`에는 파일 스트림, 자동 ID 상태와 B+ 트리 등이 들어 있다. SELECT도 파일 커서를 움직이기 때문에 하나의 `Table*`에 읽기 공유 lock만 붙여 여러 SELECT를 실행하는 구조로 만들지 않았다.
+기존 `Table`에는 파일 스트림 하나, 자동 ID 상태와 B+ 트리가 들어 있다. SELECT도 파일 위치를 움직이므로, 하나의 `Table*`에 공유 lock만 붙여 여러 SELECT를 동시에 실행할 수는 없다. 반면 B+ 트리 조회(`bptree_find`)는 트리를 읽기만 하므로 인덱스 자체는 여러 스레드가 함께 읽어도 된다.
 
-서버 시작 시 writer 테이블 하나와 SQL worker별 reader 테이블 하나를 연다. worker index는 Thread Pool의 수명 동안 고정된다.
+그래서 **인덱스는 하나를 공유하고, 파일 핸들만 worker마다 따로 둔다.** 서버 시작 시 `Table`을 하나 열고(파일 전체를 한 번 읽어 인덱스 구축), SQL worker마다 같은 파일을 읽기 전용으로 여는 `TableReader`를 하나씩 만든다. worker index는 Thread Pool의 수명 동안 고정된다.
 
-| 컨텍스트 | 사용하는 작업 | 파일·인덱스 소유권 |
+| 컨텍스트 | 사용하는 작업 | 소유 |
 |---|---|---|
-| writer 1개 | INSERT, reader에서 놓친 ID 재조회 | 최신 ID와 전체 최신 인덱스 관리 |
-| reader W개 | SELECT | 각자 독립 `FILE*`와 시작 시점 인덱스 보유 |
+| `Table` 1개 | INSERT | 쓰기용 `FILE*`, 최신 ID, **공유 B+ 트리** |
+| `TableReader` W개 | SELECT | 각자 읽기용 `FILE*`. 인덱스는 `Table`의 것을 읽는다 |
 
-reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같은 `Table*`에 동시에 들어가지 않게 한다. HTTP 경로에서는 worker가 자기 index를 사용한다.
+불변 조건은 하나다. **공유 인덱스는 공유 gate 아래에서만 읽고, 배타 gate 아래에서만 바뀐다.** 인덱스가 하나뿐이므로 INSERT 직후 다른 worker의 ID 조회도 새 행을 바로 찾는다. 별도의 재조회 경로가 없다.
+
+reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같은 `TableReader`에 동시에 들어가지 않게 하는 방어 장치다. HTTP 경로에서는 worker가 자기 index를 사용한다.
+
+이전 구현은 worker마다 `Table`을 따로 열어 인덱스를 복제했다. 그 결과 다음 비용이 있었고, 모두 이 구조로 없앴다.
+- 메모리·시작 시간이 worker 수에 비례
+- 시작 시점 인덱스에 없는 새 ID를 쓰기용 `Table`에서 다시 찾는 재조회 장치(`first/last_insert_id`, writer mutex, 관련 지표)
+
+측정 결과는 [최소 검증 결과](phase3-benchmarks/20261116/minimal-report.md)의 B4 절에 있다.
 
 ### 읽기·쓰기 gate
 
 내부 헤더의 `WriterPreferredGate`는 다음 규칙을 적용한다. 별도 단위 테스트에서는 실제 writer 대기 등록 상태를 관찰해 순서를 검증하며, 운영 코드에 테스트용 정지 callback은 넣지 않는다.
 
-- SELECT는 공유 gate를 획득한다. 서로 다른 reader에서는 동시에 기존 executor를 실행할 수 있다.
-- INSERT는 독점 gate를 획득한다. 실행 중인 SELECT가 끝난 뒤 시작하며, 쓰기 중에는 새 SELECT가 실행되지 않는다.
+- SELECT는 reader mutex → 공유 gate 순서로 획득한 뒤 `executor_run_read`를 호출한다. 서로 다른 reader는 동시에 실행할 수 있다.
+- INSERT는 독점 gate만 획득한 뒤 `executor_run`을 호출한다. 실행 중인 SELECT가 끝난 뒤 시작하며, 쓰기 중에는 새 SELECT가 실행되지 않는다.
 - 기다리는 writer가 있으면 새 reader가 먼저 통과하지 않도록 한다. 이미 진행 중인 reader를 중단하지는 않는다.
-- writer 파일을 접근하는 INSERT와 ID fallback은 별도의 writer mutex도 획득한다. gate 뒤에 writer mutex를 획득하는 순서를 유지한다.
 
 이 정책은 읽기와 쓰기를 동시에 진행하는 MVCC가 아니다. writer가 계속 들어올 때 reader의 기아가 없다는 보장이나, 요청 수락 순서와 완료 순서가 같다는 보장도 제공하지 않는다.
 
-### 시작 이후 ID의 일관성
+### 새 행이 보이는 이유
 
-reader 인덱스는 열 때 구축한 상태를 유지한다. 현재 엔진은 append-only이므로 기존 ID의 파일 위치는 바뀌지 않는다. 따라서 reader 인덱스가 찾은 ID는 기존 위치를 그대로 사용한다.
+- **ID 조회:** INSERT는 배타 gate 안에서 파일에 쓰고 `fflush`한 뒤 공유 인덱스에 키를 추가한다. 이후 SELECT는 공유 gate 아래에서 같은 인덱스로 위치를 찾고, 자기 `FILE*`를 그 위치로 `fseek`해 읽는다.
+- **스캔:** 전체 조회와 age 조회는 매번 `fseek(0)`부터 읽는다. `fseek`는 stdio 버퍼와 EOF 상태를 비우므로, 이전에 파일 끝까지 읽었던 핸들도 새로 추가된 행을 읽는다.
+- **추가가 끼어들지 않음:** 읽는 동안 INSERT가 막히므로 하나의 SELECT 실행 중 파일과 인덱스가 바뀌지 않는다. 이 성질은 모든 접근이 이 서버를 통한다는 조건에서 성립한다.
+- **저장 실패:** 쓰기에 실패하면 공유 `Table`에 `write_failed`가 기록된다. 이후 모든 `TableReader` 조회도 같은 상태를 확인해 거절한다.
 
-reader 인덱스가 ID를 찾지 못하면 아래 성공 INSERT 범위를 확인하고, 필요한 경우에만 같은 SQL을 writer 컨텍스트에서 다시 실행한다. 이때 공유 gate를 유지하여 INSERT가 끼어들지 못하게 하고, writer mutex로 writer의 파일 커서를 보호한다. 실제 읽기 오류는 정상적인 인덱스 miss로 취급하지 않는다.
-
-이 방식으로 새로 INSERT한 ID를 다음 SELECT에서 찾을 수 있다. reader 인덱스를 실시간으로 복제하거나 새 행마다 전체 인덱스를 재구축하지 않는다.
-
-miss가 났다고 해서 모두 writer로 보내지는 않는다. adapter는 서버 시작 이후 처음 성공한 INSERT의 ID(`first_insert_id`)와 마지막 성공 ID(`last_insert_id`)를 기록한다. writer와 모든 reader는 시작할 때 같은 파일로 인덱스를 만들고, ID는 `last_id + 1`로만 증가한다. 따라서 `first_insert_id`보다 작은 ID의 miss는 처음부터 없던 행이고, `last_insert_id`보다 큰 ID는 아직 삽입하지 않은 행이다. 이런 miss와 INSERT가 아직 없을 때의 miss는 writer를 거치지 않고 빈 결과로 끝낸다.
-
-두 경계는 성공한 INSERT의 독점 gate 안에서 갱신하고 SELECT의 공유 gate 안에서 함께 읽는다. 각 값이 atomic이라는 사실만으로 일관된 범위가 보장되는 것은 아니다. 실패한 INSERT는 범위를 바꾸지 않으며, 쓰기 실패로 엔진이 사용 불가가 되면 범위 판정보다 먼저 요청을 거절한다. 재시작 시 두 값은 0으로 초기화하고 이전 행들은 다시 구축한 reader 인덱스에서 찾는다.
-
-fallback은 `first_insert_id <= 조회 ID <= last_insert_id`인 miss에만 남는다. 현재의 추가 전용·단일 writer 조건에서는 실제로 삽입된 신규 ID들이지만, 실제 writer 조회와 오류 검사를 생략하지 않는다. 이 조회는 writer mutex에서 직렬화된다. 상한은 성공 콜백의 ID를 그대로 저장하므로 범위 계산에 덧셈을 추가하지 않는다.
-
-전체 조회·age 조회는 reader의 파일을 새로 탐색한다. 읽는 동안 INSERT가 막히므로 하나의 SELECT 실행 중 파일이 추가되지 않는다. 이 성질은 모든 접근이 이 서버를 통한다는 조건에서 성립한다.
+실제 읽기 오류는 정상적인 인덱스 miss로 취급하지 않는다.
 
 ## 4. 요청 하나의 실행 과정
 
@@ -96,7 +102,7 @@ worker에서는 기존 `parser_next`로 첫 문장을 읽고, 다시 호출하�
 
 서버는 기존 스키마 범위를 미리 확인하여 값 오류를 HTTP 422로 분류한다. 실제 `executor_run`도 원래의 검증을 계속 수행한다.
 
-독점 gate와 writer mutex를 획득한 뒤 기존 executor를 호출한다. 기존 Storage가 파일과 인덱스 작업을 마치고 성공 callback을 호출하면, adapter는 ID와 `committed` 상태만 기록한다. 이 callback은 메모리를 할당하지 않고 C++ 예외를 밖으로 던지지 않는다.
+독점 gate를 획득한 뒤 기존 `executor_run`을 호출한다. 기존 Storage가 파일과 인덱스 작업을 마치고 성공 callback을 호출하면, adapter는 ID와 `committed` 상태만 기록한다. 이 callback은 메모리를 할당하지 않고 C++ 예외를 밖으로 던지지 않는다.
 
 여기서 `committed`/`write_outcome: applied`는 기존 C API가 INSERT 성공을 알렸다는 뜻이다. 트랜잭션 commit, WAL 기록, `fsync`에 의한 전원 장애 내구성을 추가한 뜻은 아니다. 기존 엔진의 flush·오류 처리 계약을 유지한다.
 
@@ -147,24 +153,23 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 | `pool.expired` | worker의 실행 전 만료 검사에서 끝난 작업 수 |
 | `engine.requests` | adapter의 `execute` 호출 수. 만료된 요청은 포함하지 않음 |
 | `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과 |
-| `engine.fallbacks` | reader ID miss 뒤 writer 인덱스를 조회한 수 |
-| `engine.fallbacks_skipped` | reader ID miss 중 서버 시작 이후 성공한 INSERT가 아직 없거나, 조회 ID가 성공 INSERT 범위(`[first_insert_id, last_insert_id]`) 밖이라서 writer 재조회 없이 빈 결과로 끝난 수 |
-| `engine.current_executions`, `peak_executions` | 기존 `executor_run` 호출 범위의 현재·최대 중첩 수 |
-| `engine.lock_wait_us` | reader mutex, gate, writer mutex의 누적 대기 |
+| `engine.current_executions`, `peak_executions` | C executor 호출(`executor_run`, `executor_run_read`) 범위의 현재·최대 중첩 수 |
+| `engine.lock_wait_us` | reader mutex와 gate의 누적 대기 |
 | `engine.lock_wait.<종류>.count` | 해당 잠금의 성공한 획득 횟수. 경합 없이 획득한 경우도 포함 |
 | `engine.lock_wait.<종류>.total_us`, `max_us` | 획득 직전→직후의 누적·최대 시간. 보유 시간 제외 |
-| `engine.execution_us` | 기존 executor 호출에 쓴 누적 시간. fallback도 별도 호출로 포함 |
+| `engine.execution_us` | C executor 호출에 쓴 누적 시간 |
 
-잠금 종류는 `reader_mutex`, `read_gate`, `write_gate`, `insert_writer_mutex`, `fallback_mutex`다. `count`를 실제 경합 횟수로 해석하지 않는다. 평균 획득 시간은 count가 양수일 때 `total_us / count`로 계산하며, microsecond 미만 시간은 0이 될 수 있다. 모든 작업이 끝나면 다섯 `total_us`의 합과 기존 `lock_wait_us`가 일치한다.
+잠금 종류는 `reader_mutex`, `read_gate`, `write_gate`다. `count`를 실제 경합 횟수로 해석하지 않는다. 평균 획득 시간은 count가 양수일 때 `total_us / count`로 계산하며, microsecond 미만 시간은 0이 될 수 있다. 모든 작업이 끝나면 세 `total_us`의 합과 기존 `lock_wait_us`가 일치한다.
+
+단일 인덱스로 바꾸면서(계획 06) 재조회가 없어졌으므로 `engine.fallbacks`, `engine.fallbacks_skipped`, `lock_wait.insert_writer_mutex`, `lock_wait.fallback_mutex`를 제거했다.
 
 engine 카운터는 각각 atomic으로 읽으므로 실행 중인 snapshot에서 모든 수가 정확히 같은 순간의 상태를 나타내지는 않는다. 최대값은 가산 카운터가 아니므로 두 snapshot의 차이를 측정 구간의 최대 대기로 해석하지 않는다. `peak_executions > 1`은 executor 호출이 중첩됐음을 보여주지만, 단일 SQL을 병렬화했거나 처리량이 개선됐다는 증거는 아니다.
 
 ## 8. 성능의 범위와 비용
 
-현재 선택은 Phase 1·2를 변경하지 않고 독립 SELECT를 병렬로 실행하기 위한 방법이다. 다음 비용을 감수한다.
+현재 구조는 C 공개 API를 유지한 채 읽기 핸들만 추가해, 독립 SELECT를 병렬로 실행한다. 다음 비용과 한계가 있다.
 
-- `W`개 worker를 위해 `W + 1`회 테이블을 열고 각각 B+ 트리를 구축한다. 데이터가 크면 초기화 시간과 인덱스 메모리도 그 수에 영향을 받는다.
-- 시작 이후 실제로 삽입한 ID는 reader 인덱스에 없으므로 writer fallback으로 모일 수 있다. 성공 INSERT 범위 밖의 없는 ID는 fallback 없이 처리한다. 이 최적화는 writer 접근을 줄이지만 HTTP 처리량 개선 정도는 별도 측정해야 한다.
+- 인덱스는 하나지만 파일은 worker 수 + 1개의 핸들로 열린다. 핸들마다 stdio 버퍼가 있다.
 - 긴 순차 탐색은 writer를 기다리게 한다. writer가 대기하면 이후 reader도 gate에서 기다린다.
 - 파일 읽기, 결과 복사, JSON 직렬화와 HTTP 전송 비용은 인덱스 검색 시간과 별개다.
 - 결과·대기열 제한은 과도한 단일 요청과 대기열 증가를 제어하지만 프로세스 전체 메모리 사용량을 정확한 상한으로 제한하지 않는다.

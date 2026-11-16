@@ -86,10 +86,14 @@ def main(root, expected=None):
                 phase['classes'].get('write', {}).get('successful', 0)
                 for phase in (summary, summary['warmup_summary']))
             engine = summary['metrics_delta']['engine']
-            if summary['variant'] != 'old' and summary['scenario'] in ('missing', 'missing_future'):
+            # Fallback counters exist only in results from the replicated-index
+            # design (before plan 06); the single shared index has no fallback.
+            if 'fallbacks' not in engine:
+                pass
+            elif summary['variant'] != 'old' and summary['scenario'] in ('missing', 'missing_future'):
                 if engine['fallbacks'] != 0 or engine['fallbacks_skipped'] != summary['success_after_drain']:
                     raise RuntimeError(f"unexpected missing-ID fallback counters: {summary['name']}")
-            if summary['variant'] == 'old' and summary['scenario'] == 'missing_future':
+            elif summary['variant'] == 'old' and summary['scenario'] == 'missing_future':
                 if engine['fallbacks'] != summary['success_after_drain']:
                     raise RuntimeError(f"legacy baseline did not exercise fallback: {summary['name']}")
             all_summaries.append(summary)

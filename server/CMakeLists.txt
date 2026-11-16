@@ -135,7 +135,7 @@ if(BUILD_TESTING)
         minidb_project_options(minidb_test_engine)
         add_executable(minidb_engine_gate_test tests/engine_gate_test.cpp)
         target_link_libraries(minidb_engine_gate_test PRIVATE minidb_test_engine)
-        target_link_options(minidb_engine_gate_test PRIVATE "-Wl,--wrap=executor_run")
+        target_link_options(minidb_engine_gate_test PRIVATE "-Wl,--wrap=executor_run" "-Wl,--wrap=executor_run_read")
         minidb_project_options(minidb_engine_gate_test)
         add_test(NAME phase3_engine_gate COMMAND minidb_engine_gate_test)
         set_tests_properties(phase3_engine_gate PROPERTIES TIMEOUT 30)
@@ -154,7 +154,7 @@ if(BUILD_TESTING)
             add_executable(minidb_server_test main.cpp tests/api_executor_control.cpp)
             target_link_libraries(minidb_server_test PRIVATE
                 minidb_server_engine minidb_thread_pool Drogon::Drogon)
-            target_link_options(minidb_server_test PRIVATE "-Wl,--wrap=executor_run")
+            target_link_options(minidb_server_test PRIVATE "-Wl,--wrap=executor_run_read")
             minidb_project_options(minidb_server_test)
             add_test(NAME phase3_control_api
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/control_api_test.py"

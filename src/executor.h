@@ -21,4 +21,8 @@ typedef struct {
 /* 0 성공, -1 실패(err에 원인). sink나 그 안의 콜백은 NULL이어도 된다. */
 int executor_run(Table *t, const Statement *st, const ResultSink *sink, DbError *err);
 
+/* SELECT만 실행한다. 결과는 executor_run과 같고, 파일은 r의 핸들로 읽는다.
+ * 동시성 조건은 storage.h의 TableReader 설명을 따른다. */
+int executor_run_read(TableReader *r, const Statement *st, const ResultSink *sink, DbError *err);
+
 #endif

@@ -111,20 +111,12 @@ class ApiTest(unittest.TestCase):
                 status, selected = server.query("SELECT * FROM users WHERE id = 1;")
                 self.assertEqual(status, 200)
                 self.assertEqual(selected["rows"], [{"id": "1", "name": "한글 O'Brien", "age": 25}])
-                self.assertGreaterEqual(server.metrics()["engine"]["fallbacks"], 1)
                 status, all_rows = server.query("SELECT * FROM users;")
                 self.assertEqual((status, all_rows["row_count"]), (200, 1))
-                before = server.metrics()["engine"]
                 self.assertEqual(server.query("SELECT * FROM users WHERE id = 999;")[1]["rows"], [])
-                after = server.metrics()["engine"]
-                self.assertEqual(after["fallbacks"], before["fallbacks"])
-                self.assertEqual(after["fallbacks_skipped"], before["fallbacks_skipped"] + 1)
             with Server(directory) as restarted:
                 self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 1;")[1]["row_count"], 1)
-                # No INSERT since startup: the reader index alone settles a miss.
                 self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 999;")[1]["rows"], [])
-                engine = restarted.metrics()["engine"]
-                self.assertEqual((engine["fallbacks"], engine["fallbacks_skipped"]), (0, 1))
                 status, inserted = restarted.query("INSERT INTO users (name, age) VALUES ('next', 26);")
                 self.assertEqual((status, inserted["inserted_id"]), (200, "2"))
 
@@ -133,19 +125,14 @@ class ApiTest(unittest.TestCase):
             with Server(directory) as server:
                 self.assertEqual(server.query("INSERT INTO users (name, age) VALUES ('first', 1);")[0], 200)
                 self.assertEqual(server.query("SELECT * FROM users WHERE id = 2;")[1]["rows"], [])
-                engine = server.metrics()["engine"]
-                self.assertEqual((engine["fallbacks"], engine["fallbacks_skipped"]), (0, 1))
                 status, inserted = server.query("INSERT INTO users (name, age) VALUES ('second', 2);")
                 self.assertEqual((status, inserted["inserted_id"]), (200, "2"))
                 status, selected = server.query("SELECT * FROM users WHERE id = 2;")
                 self.assertEqual((status, selected["rows"]), (200, [{"id": "2", "name": "second", "age": 2}]))
-                engine = server.metrics()["engine"]
-                self.assertEqual((engine["fallbacks"], engine["fallbacks_skipped"]), (1, 1))
+                self.assertNotIn("fallbacks", server.metrics()["engine"])
             with Server(directory) as restarted:
                 self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 2;")[1]["row_count"], 1)
                 self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 3;")[1]["rows"], [])
-                engine = restarted.metrics()["engine"]
-                self.assertEqual((engine["fallbacks"], engine["fallbacks_skipped"]), (0, 1))
 
     def test_lock_wait_breakdown(self):
         with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory:
@@ -157,8 +144,7 @@ class ApiTest(unittest.TestCase):
                     self.assertEqual(server.query(sql)[0], 200)
                 engine = server.metrics()["engine"]
                 waits = engine["lock_wait"]
-                expected = {"reader_mutex": 2, "read_gate": 2, "write_gate": 1,
-                            "insert_writer_mutex": 1, "fallback_mutex": 1}
+                expected = {"reader_mutex": 2, "read_gate": 2, "write_gate": 1}
                 self.assertEqual(set(waits), set(expected))
                 for name, count in expected.items():
                     self.assertEqual(set(waits[name]), {"count", "total_us", "max_us"})

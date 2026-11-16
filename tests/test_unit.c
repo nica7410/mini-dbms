@@ -2,6 +2,10 @@
  * 단위 테스트: Parser, Storage, Executor를 함수 단위로 검증한다.
  * 사용법: test_unit <임시 디렉터리>
  */
+#ifndef _WIN32
+#define _XOPEN_SOURCE 700 /* setrlimit, SIGXFSZ: 쓰기 실패 재현용 */
+#endif
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +19,8 @@
 #include <direct.h>
 #define make_dir(path) _mkdir(path)
 #else
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #define make_dir(path) mkdir((path), 0755)
@@ -724,6 +730,123 @@ static void test_index_splits_and_reopen(void) {
     CHECK(table_close(t, &err) == 0);
 }
 
+/* ---------- TableReader ---------- */
+
+static void test_reader_shares_index(void) {
+    const char *dir = fresh_dir("reader_shared");
+    const char data[] = "1\ta\t25\n2\tb\t30\n";
+    Table *t = NULL;
+    TableReader *r1 = NULL;
+    TableReader *r2 = NULL;
+    DbError err = {{0}};
+    Collected c;
+    Collected all;
+    int64_t id = 0;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_reader_open(t, &r1, &err) == 0);
+    CHECK(table_reader_open(t, &r2, &err) == 0);
+
+    /* 두 핸들을 번갈아 써도 서로의 파일 위치에 영향을 주지 않는다. */
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_find_id(r1, 2, collect_row, &c, &err) == 0 && c.count == 1 && c.ids[0] == 2);
+    CHECK(table_reader_find_id(r2, 1, collect_row, &c, &err) == 0 && c.count == 2 && c.ids[1] == 1);
+    CHECK(table_reader_find_id(r1, 3, collect_row, &c, &err) == 0 && c.count == 2); /* 없는 ID */
+
+    /* 끝까지 읽어 EOF 상태가 된 핸들도, 뒤에 추가된 행을 다시 읽는다. */
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_scan(r2, collect_row, &c, &err) == 0 && c.count == 2);
+    CHECK(table_append(t, "kim", 40, &id, &err) == 0 && id == 3);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_find_id(r1, 3, collect_row, &c, &err) == 0 && c.count == 1 &&
+          strcmp(c.names[0], "kim") == 0 && c.ages[0] == 40);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_scan(r2, collect_row, &c, &err) == 0 && c.count == 3 && c.ids[2] == 3);
+
+    /* reader 스캔 결과는 Table 스캔 결과와 같다. */
+    memset(&all, 0, sizeof all);
+    CHECK(table_scan(t, collect_row, &all, &err) == 0 && all.count == c.count &&
+          memcmp(all.ids, c.ids, sizeof c.ids) == 0);
+
+    CHECK(table_reader_close(r1, &err) == 0);
+    CHECK(table_reader_close(r2, &err) == 0);
+    CHECK(table_reader_close(NULL, &err) == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
+static void test_reader_executor(void) {
+    const char *dir = fresh_dir("reader_exec");
+    const char data[] = "1\ta\t25\n2\tb\t30\n3\tc\t25\n";
+    char kim[] = "kim";
+    Table *t = NULL;
+    TableReader *r = NULL;
+    DbError err = {{0}};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25};
+    Statement ins = {STMT_INSERT, kim, 20, WHERE_NONE, 0};
+    ResultSink sink = {NULL, collect_row, NULL};
+    Collected c;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_reader_open(t, &r, &err) == 0);
+    sink.ctx = &c;
+
+    memset(&c, 0, sizeof c);
+    CHECK(executor_run_read(r, &sel, &sink, &err) == 0 && c.count == 2 && c.ids[0] == 1 && c.ids[1] == 3);
+    sel.where = WHERE_ID;
+    sel.where_value = 2;
+    memset(&c, 0, sizeof c);
+    CHECK(executor_run_read(r, &sel, &sink, &err) == 0 && c.count == 1 && c.ids[0] == 2);
+    sel.where = WHERE_NONE;
+    memset(&c, 0, sizeof c);
+    CHECK(executor_run_read(r, &sel, &sink, &err) == 0 && c.count == 3);
+
+    /* 읽기 핸들로는 INSERT를 실행하지 않는다. 파일도 바뀌지 않는다. */
+    CHECK(executor_run_read(r, &ins, &sink, &err) == -1);
+    CHECK(strstr(err.msg, "SELECT만") != NULL);
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 3);
+
+    CHECK(table_reader_close(r, &err) == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
+#ifndef _WIN32
+static void test_reader_after_write_failure(void) {
+    /* 파일 크기 제한으로 쓰기를 실패시키면, 같은 Table의 reader도 조회를 거부한다. */
+    const char *dir = fresh_dir("reader_write_failed");
+    const char data[] = "1\ta\t1\n";
+    Table *t = NULL;
+    TableReader *r = NULL;
+    DbError err = {{0}};
+    struct rlimit previous;
+    struct rlimit limited;
+    void (*old_handler)(int);
+    int64_t id = 0;
+    int appended;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_reader_open(t, &r, &err) == 0);
+    CHECK(getrlimit(RLIMIT_FSIZE, &previous) == 0);
+    old_handler = signal(SIGXFSZ, SIG_IGN);
+    limited = previous;
+    limited.rlim_cur = sizeof data - 1;
+    CHECK(setrlimit(RLIMIT_FSIZE, &limited) == 0);
+    appended = table_append(t, "b", 2, &id, &err);
+    CHECK(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+    signal(SIGXFSZ, old_handler);
+
+    CHECK(appended == -1);
+    CHECK(table_reader_find_id(r, 1, NULL, NULL, &err) == -1);
+    CHECK(strstr(err.msg, "쓰기에 실패") != NULL);
+    CHECK(table_reader_scan(r, NULL, NULL, &err) == -1);
+    CHECK(table_reader_close(r, &err) == 0);
+    (void)table_close(t, &err);
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "사용법: test_unit <임시 디렉터리>\n");
@@ -759,6 +882,12 @@ int main(int argc, char **argv) {
     test_executor_where();
     test_executor_select_paths();
     test_index_splits_and_reopen();
+
+    test_reader_shares_index();
+    test_reader_executor();
+#ifndef _WIN32
+    test_reader_after_write_failure();
+#endif
 
     printf("단위 테스트: %d개 검사 중 %d개 실패\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -48,6 +48,34 @@ static int filter_age(const Row *row, void *ctx) {
     return f->next(row, f->next_ctx);
 }
 
+/* SELECT 실행. r이 NULL이 아니면 t 대신 r의 파일 핸들로 읽는다. */
+static int run_select(Table *t, TableReader *r, const Statement *st, const ResultSink *sink,
+                      DbError *err) {
+    RowFn on_row = sink != NULL ? sink->on_row : NULL;
+    void *ctx = sink != NULL ? sink->ctx : NULL;
+    FilterCtx f = {st->where_value, on_row, ctx};
+
+    switch (st->where) {
+    case WHERE_NONE:
+        return r != NULL ? table_reader_scan(r, on_row, ctx, err) : table_scan(t, on_row, ctx, err);
+    case WHERE_ID:
+        return r != NULL ? table_reader_find_id(r, st->where_value, on_row, ctx, err)
+                         : table_find_id(t, st->where_value, on_row, ctx, err);
+    case WHERE_AGE:
+        return r != NULL ? table_reader_scan(r, filter_age, &f, err) : table_scan(t, filter_age, &f, err);
+    }
+    db_error_set(err, "알 수 없는 WHERE 조건입니다");
+    return -1;
+}
+
+int executor_run_read(TableReader *r, const Statement *st, const ResultSink *sink, DbError *err) {
+    if (st->kind != STMT_SELECT) {
+        db_error_set(err, "읽기 핸들로는 SELECT만 실행할 수 있습니다");
+        return -1;
+    }
+    return run_select(NULL, r, st, sink, err);
+}
+
 int executor_run(Table *t, const Statement *st, const ResultSink *sink, DbError *err) {
     switch (st->kind) {
     case STMT_INSERT: {
@@ -63,19 +91,8 @@ int executor_run(Table *t, const Statement *st, const ResultSink *sink, DbError 
         }
         return 0;
     }
-    case STMT_SELECT: {
-        RowFn on_row = sink != NULL ? sink->on_row : NULL;
-        void *ctx = sink != NULL ? sink->ctx : NULL;
-        FilterCtx f = {st->where_value, on_row, ctx};
-
-        switch (st->where) {
-        case WHERE_NONE: return table_scan(t, on_row, ctx, err);
-        case WHERE_ID: return table_find_id(t, st->where_value, on_row, ctx, err);
-        case WHERE_AGE: return table_scan(t, filter_age, &f, err);
-        }
-        db_error_set(err, "알 수 없는 WHERE 조건입니다");
-        return -1;
-    }
+    case STMT_SELECT:
+        return run_select(t, NULL, st, sink, err);
     }
     db_error_set(err, "알 수 없는 문장 종류입니다");
     return -1;

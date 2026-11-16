@@ -1,0 +1,2111 @@
+{
+  "offered": 208,
+  "submitted": 208,
+  "not_submitted": 0,
+  "elapsed_with_drain_s": 35.00486351800009,
+  "client_cpu_s": 0.11029649999999999,
+  "client_cpu_fraction": 0.003150890731034665,
+  "offered_rps": 6.933333333333334,
+  "completed_rps": 5.866666666666666,
+  "successful_rps": 3.2666666666666666,
+  "success_after_drain": 116,
+  "generator_lag_p99_ms": 0.07530499999575113,
+  "errors": {
+    "QUEUE_TIMEOUT": 92
+  },
+  "classes": {
+    "scan": {
+      "submitted": 189,
+      "successful": 108,
+      "completed_during_window": 162,
+      "p50_ms": 5145.232637999925,
+      "p95_ms": 5253.213290999952,
+      "p99_ms": 5325.985332000073,
+      "scheduled_p99_ms": 5325.9912319999785,
+      "errors": {
+        "QUEUE_TIMEOUT": 81
+      }
+    },
+    "write": {
+      "submitted": 19,
+      "successful": 8,
+      "completed_during_window": 14,
+      "p50_ms": 4785.204069000088,
+      "p95_ms": 4917.280662999929,
+      "p99_ms": 4917.280662999929,
+      "scheduled_p99_ms": 4917.288862999953,
+      "errors": {
+        "QUEUE_TIMEOUT": 11
+      }
+    }
+  },
+  "name": "parallel-w1-scan_write-r2-closed",
+  "variant": "parallel",
+  "workers": 1,
+  "scenario": "scan_write",
+  "repeat": 2,
+  "rate": null,
+  "rows": 1000000,
+  "duration_s": 30,
+  "warmup_s": 5,
+  "clients": 32,
+  "processes": 4,
+  "startup_s": 0.12528982799994992,
+  "memory": {
+    "VmHWM": 40497152,
+    "VmRSS": 40497152,
+    "cpu_seconds": 44.49
+  },
+  "metrics_before": {
+    "engine": {
+      "current_executions": 0,
+      "errors": 0,
+      "execution_us": 9211465,
+      "healthy": true,
+      "lock_wait": {
+        "read_gate": {
+          "count": 28,
+          "max_us": 0,
+          "total_us": 0
+        },
+        "reader_mutex": {
+          "count": 28,
+          "max_us": 0,
+          "total_us": 0
+        },
+        "write_gate": {
+          "count": 103,
+          "max_us": 0,
+          "total_us": 0
+        }
+      },
+      "lock_wait_us": 0,
+      "peak_executions": 1,
+      "requests": 131,
+      "successful_inserts": 103,
+      "successful_selects": 28
+    },
+    "pool": {
+      "accepted": 147,
+      "active": 0,
+      "completed": 147,
+      "expired": 16,
+      "failed_tasks": 0,
+      "max_queue_wait_us": 5265437,
+      "peak_active": 1,
+      "queue_wait_us": 195878860,
+      "queued": 0,
+      "queued_bytes": 0,
+      "rejected": 0,
+      "workers": 1
+    }
+  },
+  "metrics_after": {
+    "engine": {
+      "current_executions": 0,
+      "errors": 0,
+      "execution_us": 44193240,
+      "healthy": true,
+      "lock_wait": {
+        "read_gate": {
+          "count": 136,
+          "max_us": 0,
+          "total_us": 0
+        },
+        "reader_mutex": {
+          "count": 136,
+          "max_us": 1,
+          "total_us": 1
+        },
+        "write_gate": {
+          "count": 111,
+          "max_us": 0,
+          "total_us": 0
+        }
+      },
+      "lock_wait_us": 1,
+      "peak_executions": 1,
+      "requests": 247,
+      "successful_inserts": 111,
+      "successful_selects": 136
+    },
+    "pool": {
+      "accepted": 355,
+      "active": 0,
+      "completed": 355,
+      "expired": 108,
+      "failed_tasks": 0,
+      "max_queue_wait_us": 5324308,
+      "peak_active": 1,
+      "queue_wait_us": 1190474412,
+      "queued": 0,
+      "queued_bytes": 0,
+      "rejected": 0,
+      "workers": 1
+    }
+  },
+  "metrics_delta": {
+    "engine": {
+      "errors": 0,
+      "execution_us": 34981775,
+      "lock_wait": {
+        "read_gate": {
+          "count": 108,
+          "total_us": 0
+        },
+        "reader_mutex": {
+          "count": 108,
+          "total_us": 1
+        },
+        "write_gate": {
+          "count": 8,
+          "total_us": 0
+        }
+      },
+      "lock_wait_us": 1,
+      "requests": 116,
+      "successful_inserts": 8,
+      "successful_selects": 108
+    },
+    "pool": {
+      "accepted": 208,
+      "completed": 208,
+      "expired": 92,
+      "failed_tasks": 0,
+      "queue_wait_us": 994595552,
+      "rejected": 0
+    }
+  },
+  "samples": [
+    {
+      "time": 596.047115756,
+      "memory": {
+        "VmHWM": 40386560,
+        "VmRSS": 40386560,
+        "cpu_seconds": 9.38
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 0,
+          "errors": 0,
+          "execution_us": 9211465,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 28,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 28,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 131,
+          "successful_inserts": 103,
+          "successful_selects": 28
+        },
+        "pool": {
+          "accepted": 147,
+          "active": 0,
+          "completed": 147,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 195878860,
+          "queued": 0,
+          "queued_bytes": 0,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 597.051684183,
+      "memory": {
+        "VmHWM": 40439808,
+        "VmRSS": 40439808,
+        "cpu_seconds": 10.2
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 9889466,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 31,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 31,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 134,
+          "successful_inserts": 103,
+          "successful_selects": 30
+        },
+        "pool": {
+          "accepted": 181,
+          "active": 1,
+          "completed": 149,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 196891861,
+          "queued": 31,
+          "queued_bytes": 1501,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 598.054083002,
+      "memory": {
+        "VmHWM": 40443904,
+        "VmRSS": 40443904,
+        "cpu_seconds": 11.2
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 10913957,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 34,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 34,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 137,
+          "successful_inserts": 103,
+          "successful_selects": 33
+        },
+        "pool": {
+          "accepted": 184,
+          "active": 1,
+          "completed": 152,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 200981463,
+          "queued": 31,
+          "queued_bytes": 1501,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 599.057696982,
+      "memory": {
+        "VmHWM": 40443904,
+        "VmRSS": 40443904,
+        "cpu_seconds": 12.22
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 11905996,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 37,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 37,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 140,
+          "successful_inserts": 103,
+          "successful_selects": 36
+        },
+        "pool": {
+          "accepted": 187,
+          "active": 1,
+          "completed": 155,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 208066455,
+          "queued": 31,
+          "queued_bytes": 1501,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 600.060716832,
+      "memory": {
+        "VmHWM": 40456192,
+        "VmRSS": 40456192,
+        "cpu_seconds": 13.22
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 12872653,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 40,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 40,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 143,
+          "successful_inserts": 103,
+          "successful_selects": 39
+        },
+        "pool": {
+          "accepted": 190,
+          "active": 1,
+          "completed": 158,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 218112295,
+          "queued": 31,
+          "queued_bytes": 1523,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 601.06349477,
+      "memory": {
+        "VmHWM": 40460288,
+        "VmRSS": 40460288,
+        "cpu_seconds": 14.23
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 13870474,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 43,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 43,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 0,
+          "peak_executions": 1,
+          "requests": 146,
+          "successful_inserts": 103,
+          "successful_selects": 42
+        },
+        "pool": {
+          "accepted": 193,
+          "active": 1,
+          "completed": 161,
+          "expired": 16,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5265437,
+          "peak_active": 1,
+          "queue_wait_us": 231085864,
+          "queued": 31,
+          "queued_bytes": 1546,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 602.066701729,
+      "memory": {
+        "VmHWM": 40472576,
+        "VmRSS": 40472576,
+        "cpu_seconds": 15.24
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 14872059,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 46,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 46,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 149,
+          "successful_inserts": 103,
+          "successful_selects": 45
+        },
+        "pool": {
+          "accepted": 212,
+          "active": 1,
+          "completed": 180,
+          "expired": 32,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 331246450,
+          "queued": 31,
+          "queued_bytes": 1571,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 603.069339287,
+      "memory": {
+        "VmHWM": 40472576,
+        "VmRSS": 40472576,
+        "cpu_seconds": 16.24
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 15835327,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 49,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 49,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 152,
+          "successful_inserts": 103,
+          "successful_selects": 48
+        },
+        "pool": {
+          "accepted": 215,
+          "active": 1,
+          "completed": 183,
+          "expired": 32,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 346074773,
+          "queued": 31,
+          "queued_bytes": 1571,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 604.071537903,
+      "memory": {
+        "VmHWM": 40472576,
+        "VmRSS": 40472576,
+        "cpu_seconds": 17.24
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 16815673,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 52,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 52,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 103,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 155,
+          "successful_inserts": 103,
+          "successful_selects": 51
+        },
+        "pool": {
+          "accepted": 218,
+          "active": 1,
+          "completed": 186,
+          "expired": 32,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 360830458,
+          "queued": 31,
+          "queued_bytes": 1571,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 605.077237587,
+      "memory": {
+        "VmHWM": 40472576,
+        "VmRSS": 40472576,
+        "cpu_seconds": 18.25
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 17787470,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 55,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 55,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 104,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 159,
+          "successful_inserts": 104,
+          "successful_selects": 54
+        },
+        "pool": {
+          "accepted": 222,
+          "active": 1,
+          "completed": 190,
+          "expired": 32,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 380127112,
+          "queued": 31,
+          "queued_bytes": 1549,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 606.085400389,
+      "memory": {
+        "VmHWM": 40472576,
+        "VmRSS": 40472576,
+        "cpu_seconds": 19.27
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 18749050,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 58,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 58,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 163,
+          "successful_inserts": 105,
+          "successful_selects": 57
+        },
+        "pool": {
+          "accepted": 226,
+          "active": 1,
+          "completed": 194,
+          "expired": 32,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 397373042,
+          "queued": 31,
+          "queued_bytes": 1549,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 607.087783914,
+      "memory": {
+        "VmHWM": 40476672,
+        "VmRSS": 40476672,
+        "cpu_seconds": 20.27
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 20034753,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 62,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 62,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 167,
+          "successful_inserts": 105,
+          "successful_selects": 61
+        },
+        "pool": {
+          "accepted": 244,
+          "active": 1,
+          "completed": 212,
+          "expired": 46,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 488961912,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 608.08998833,
+      "memory": {
+        "VmHWM": 40476672,
+        "VmRSS": 40476672,
+        "cpu_seconds": 21.28
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 20981769,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 65,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 65,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 170,
+          "successful_inserts": 105,
+          "successful_selects": 64
+        },
+        "pool": {
+          "accepted": 247,
+          "active": 1,
+          "completed": 215,
+          "expired": 46,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 503460597,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 609.093500508,
+      "memory": {
+        "VmHWM": 40476672,
+        "VmRSS": 40476672,
+        "cpu_seconds": 22.28
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 21957102,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 68,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 68,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 173,
+          "successful_inserts": 105,
+          "successful_selects": 67
+        },
+        "pool": {
+          "accepted": 250,
+          "active": 1,
+          "completed": 218,
+          "expired": 46,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 517934920,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 610.095627021,
+      "memory": {
+        "VmHWM": 40476672,
+        "VmRSS": 40476672,
+        "cpu_seconds": 23.29
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 22930926,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 71,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 71,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 176,
+          "successful_inserts": 105,
+          "successful_selects": 70
+        },
+        "pool": {
+          "accepted": 254,
+          "active": 1,
+          "completed": 222,
+          "expired": 47,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 537566490,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 611.098536144,
+      "memory": {
+        "VmHWM": 40480768,
+        "VmRSS": 40480768,
+        "cpu_seconds": 24.29
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 23893480,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 74,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 74,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 180,
+          "successful_inserts": 106,
+          "successful_selects": 73
+        },
+        "pool": {
+          "accepted": 259,
+          "active": 1,
+          "completed": 227,
+          "expired": 48,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 561357413,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 612.100889902,
+      "memory": {
+        "VmHWM": 40488960,
+        "VmRSS": 40488960,
+        "cpu_seconds": 25.29
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 24857484,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 77,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 77,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 183,
+          "successful_inserts": 106,
+          "successful_selects": 76
+        },
+        "pool": {
+          "accepted": 275,
+          "active": 1,
+          "completed": 243,
+          "expired": 61,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 642469304,
+          "queued": 31,
+          "queued_bytes": 1503,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 613.103434671,
+      "memory": {
+        "VmHWM": 40488960,
+        "VmRSS": 40488960,
+        "cpu_seconds": 26.31
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 25860528,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 80,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 80,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 186,
+          "successful_inserts": 106,
+          "successful_selects": 79
+        },
+        "pool": {
+          "accepted": 278,
+          "active": 1,
+          "completed": 246,
+          "expired": 61,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 657050507,
+          "queued": 31,
+          "queued_bytes": 1503,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 614.10649567,
+      "memory": {
+        "VmHWM": 40488960,
+        "VmRSS": 40488960,
+        "cpu_seconds": 27.3
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 26822457,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 83,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 83,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 189,
+          "successful_inserts": 106,
+          "successful_selects": 82
+        },
+        "pool": {
+          "accepted": 281,
+          "active": 1,
+          "completed": 249,
+          "expired": 61,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 671652488,
+          "queued": 31,
+          "queued_bytes": 1526,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 615.11110196,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 28.31
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 27775923,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 86,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 86,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 192,
+          "successful_inserts": 106,
+          "successful_selects": 85
+        },
+        "pool": {
+          "accepted": 284,
+          "active": 1,
+          "completed": 252,
+          "expired": 61,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 686216553,
+          "queued": 31,
+          "queued_bytes": 1526,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 616.11366513,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 29.32
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 29047193,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 90,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 90,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 196,
+          "successful_inserts": 106,
+          "successful_selects": 89
+        },
+        "pool": {
+          "accepted": 291,
+          "active": 1,
+          "completed": 259,
+          "expired": 64,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 721061713,
+          "queued": 31,
+          "queued_bytes": 1526,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 617.115755372,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 30.33
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 29982145,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 93,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 93,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 199,
+          "successful_inserts": 106,
+          "successful_selects": 92
+        },
+        "pool": {
+          "accepted": 307,
+          "active": 1,
+          "completed": 275,
+          "expired": 77,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 802142569,
+          "queued": 31,
+          "queued_bytes": 1503,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 618.118391346,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 31.33
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 30934735,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 96,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 96,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 106,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 202,
+          "successful_inserts": 106,
+          "successful_selects": 95
+        },
+        "pool": {
+          "accepted": 310,
+          "active": 1,
+          "completed": 278,
+          "expired": 77,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 816427119,
+          "queued": 31,
+          "queued_bytes": 1503,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 619.121355696,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 32.34
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 31882708,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 99,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 99,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 107,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 206,
+          "successful_inserts": 107,
+          "successful_selects": 98
+        },
+        "pool": {
+          "accepted": 314,
+          "active": 1,
+          "completed": 282,
+          "expired": 77,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 834766864,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 620.125246622,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 33.34
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 32871142,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 102,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 102,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 107,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 209,
+          "successful_inserts": 107,
+          "successful_selects": 101
+        },
+        "pool": {
+          "accepted": 317,
+          "active": 1,
+          "completed": 285,
+          "expired": 77,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 848446598,
+          "queued": 31,
+          "queued_bytes": 1480,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 621.127819065,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 34.35
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 33881800,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 105,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 105,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 213,
+          "successful_inserts": 108,
+          "successful_selects": 104
+        },
+        "pool": {
+          "accepted": 323,
+          "active": 1,
+          "completed": 291,
+          "expired": 79,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 877768672,
+          "queued": 31,
+          "queued_bytes": 1503,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 622.130300401,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 35.35
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 34855034,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 108,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 216,
+          "successful_inserts": 108,
+          "successful_selects": 107
+        },
+        "pool": {
+          "accepted": 326,
+          "active": 1,
+          "completed": 294,
+          "expired": 79,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 891742003,
+          "queued": 31,
+          "queued_bytes": 1526,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 623.13422263,
+      "memory": {
+        "VmHWM": 40493056,
+        "VmRSS": 40493056,
+        "cpu_seconds": 36.36
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 35800541,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 111,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 219,
+          "successful_inserts": 108,
+          "successful_selects": 110
+        },
+        "pool": {
+          "accepted": 341,
+          "active": 1,
+          "completed": 309,
+          "expired": 91,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 968635544,
+          "queued": 31,
+          "queued_bytes": 1595,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 624.136585659,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 37.36
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 37085808,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 115,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 115,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 223,
+          "successful_inserts": 108,
+          "successful_selects": 114
+        },
+        "pool": {
+          "accepted": 346,
+          "active": 1,
+          "completed": 314,
+          "expired": 92,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 993332549,
+          "queued": 31,
+          "queued_bytes": 1618,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 625.139010592,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 38.37
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 38034828,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 118,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 118,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 108,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 226,
+          "successful_inserts": 108,
+          "successful_selects": 117
+        },
+        "pool": {
+          "accepted": 349,
+          "active": 1,
+          "completed": 317,
+          "expired": 92,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1007840976,
+          "queued": 31,
+          "queued_bytes": 1618,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 626.142431488,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 39.38
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 38984360,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 121,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 121,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 109,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 230,
+          "successful_inserts": 109,
+          "successful_selects": 120
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 323,
+          "expired": 94,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1037190318,
+          "queued": 31,
+          "queued_bytes": 1572,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 627.145060082,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 40.39
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 39959972,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 124,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 124,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 235,
+          "successful_inserts": 111,
+          "successful_selects": 123
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 328,
+          "expired": 94,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1060485454,
+          "queued": 26,
+          "queued_bytes": 1291,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 628.14723837,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 41.39
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 40941889,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 127,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 127,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 238,
+          "successful_inserts": 111,
+          "successful_selects": 126
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 341,
+          "expired": 104,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1126062139,
+          "queued": 13,
+          "queued_bytes": 634,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 629.149375955,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 42.39
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 41899153,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 130,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 130,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 241,
+          "successful_inserts": 111,
+          "successful_selects": 129
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 345,
+          "expired": 105,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1145659715,
+          "queued": 9,
+          "queued_bytes": 423,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 630.156913025,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 43.41
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 42881401,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 133,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 133,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 244,
+          "successful_inserts": 111,
+          "successful_selects": 132
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 348,
+          "expired": 105,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1160171685,
+          "queued": 6,
+          "queued_bytes": 282,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    },
+    {
+      "time": 631.159817451,
+      "memory": {
+        "VmHWM": 40497152,
+        "VmRSS": 40497152,
+        "cpu_seconds": 44.41
+      },
+      "metrics": {
+        "engine": {
+          "current_executions": 1,
+          "errors": 0,
+          "execution_us": 43880420,
+          "healthy": true,
+          "lock_wait": {
+            "read_gate": {
+              "count": 136,
+              "max_us": 0,
+              "total_us": 0
+            },
+            "reader_mutex": {
+              "count": 136,
+              "max_us": 1,
+              "total_us": 1
+            },
+            "write_gate": {
+              "count": 111,
+              "max_us": 0,
+              "total_us": 0
+            }
+          },
+          "lock_wait_us": 1,
+          "peak_executions": 1,
+          "requests": 247,
+          "successful_inserts": 111,
+          "successful_selects": 135
+        },
+        "pool": {
+          "accepted": 355,
+          "active": 1,
+          "completed": 352,
+          "expired": 106,
+          "failed_tasks": 0,
+          "max_queue_wait_us": 5324308,
+          "peak_active": 1,
+          "queue_wait_us": 1180053262,
+          "queued": 2,
+          "queued_bytes": 94,
+          "rejected": 0,
+          "workers": 1
+        }
+      }
+    }
+  ],
+  "warmup_summary": {
+    "offered": 47,
+    "submitted": 47,
+    "not_submitted": 0,
+    "elapsed_with_drain_s": 9.217488028000048,
+    "client_cpu_s": 0.022109099999999993,
+    "client_cpu_fraction": 0.0023986036035890663,
+    "offered_rps": 9.4,
+    "completed_rps": 3.0,
+    "successful_rps": 3.0,
+    "success_after_drain": 31,
+    "generator_lag_p99_ms": 0.03940199997032323,
+    "errors": {
+      "QUEUE_TIMEOUT": 16
+    },
+    "classes": {
+      "scan": {
+        "submitted": 42,
+        "successful": 28,
+        "completed_during_window": 15,
+        "p50_ms": 4605.555787999947,
+        "p95_ms": 5268.040989000042,
+        "p99_ms": 5271.581735000041,
+        "scheduled_p99_ms": 5271.589335000044,
+        "errors": {
+          "QUEUE_TIMEOUT": 14
+        }
+      },
+      "write": {
+        "submitted": 5,
+        "successful": 3,
+        "completed_during_window": 0,
+        "p50_ms": 4603.879973999938,
+        "p95_ms": 4935.514559000012,
+        "p99_ms": 4935.514559000012,
+        "scheduled_p99_ms": 4935.534860000075,
+        "errors": {
+          "QUEUE_TIMEOUT": 2
+        }
+      }
+    }
+  },
+  "persisted_new_rows": 11,
+  "command": [
+    "/build/minidb_server",
+    "--data-dir",
+    "/tmp/minidb-bench-83mqtl3k",
+    "--port",
+    "50923",
+    "--workers",
+    "1",
+    "--io-threads",
+    "2",
+    "--queue-capacity",
+    "256",
+    "--queue-timeout-ms",
+    "5000"
+  ]
+}

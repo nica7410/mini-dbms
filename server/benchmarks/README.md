@@ -1,6 +1,6 @@
 # Phase 3 HTTP 성능 비교
 
-운영 서버와 동일한 W개의 reader를 유지하면서 DB 실행만 직렬화한 비교 타깃을 제공한다. `minidb_server_serial`은 단일 Table 서버가 아니므로 인덱스 복제 메모리의 이득을 나타내지 않는다. 운영 실행 파일의 기본 정책은 쓰기 우선 공유 gate다.
+운영 서버와 동일한 W개의 reader를 유지하면서 DB 실행만 직렬화한 비교 타깃을 제공한다. 운영 실행 파일의 기본 정책은 쓰기 우선 공유 gate다. `minidb_server_fair`는 도착 순서(티켓) gate 후보를 쓰는 비교 타깃이다.
 
 ```sh
 cmake -S server -B build/server -G Ninja -DCMAKE_BUILD_TYPE=Release -DMINIDB_BUILD_BENCHMARKS=ON
@@ -30,7 +30,7 @@ python3 server/benchmarks/run.py --binary build/server/minidb_server \
   --output docs/phase3-benchmarks/<run-id>/open --source-id '<snapshot>'
 ```
 
-`--old-binary`로 상한 최적화 전 서버를 비교할 수 있다. 이 경우 `--serial-binary`를 생략하고 `--scenarios missing_future --workers 1 4`를 지정해 아직 발급하지 않은 큰 ID만 조회한다. 준비 단계에서 모든 조건에 100개 신규 행을 넣으므로 기존 구현에서도 fallback이 활성화된 상태를 비교한다.
+`--old-binary`로 다른 커밋에서 빌드한 서버를 같은 실행 안에서 번갈아 측정할 수 있다. 예를 들어 인덱스 복제 구조(`1477e83`)와 단일 인덱스 구조를 `--scenarios scan_write --workers 1 8`로 비교했다. 결과는 `minimal-report.md` B4 절에 있다. 인덱스 복제 구조의 결과에만 `engine.fallbacks` 계열 지표가 있으며, `report.py`는 그 지표가 있을 때만 검사한다.
 
 ## 결과 해석
 
