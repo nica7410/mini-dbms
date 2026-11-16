@@ -68,3 +68,21 @@ Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측�
 | tests/test_unit.c | Parser·Storage·Executor 단위 테스트, 노드 분할과 재구축 검증 |
 | tests/cli_test.py | 실제 프로세스를 실행하는 CLI 통합 테스트 |
 | tests/benchmark.c | SQL INSERT 100만 건과 ID·age 조회 성능 측정 |
+
+## Phase 3 — C++ API 서버
+
+기존 C17 엔진과 CLI를 유지하고 C++17·Drogon API 서버와 고정 크기 Thread Pool을 추가했다. 독립 reader 컨텍스트에서 SELECT를 병렬 실행하고, INSERT는 단일 writer와 읽기·쓰기 gate로 보호한다.
+
+- [빌드·실행·HTTP API·제약](server/README.md)
+- [구현 설명과 동시성 설계](docs/implementation-phase3.md)
+
+Linux/WSL에서 필요한 개발 패키지를 설치한 뒤 저장소 루트에서 실행한다. 의존성 설치와 Docker 실행은 서버 README에 있다.
+
+```bash
+cmake -S server -B build/server -DCMAKE_BUILD_TYPE=Release
+cmake --build build/server --parallel 2
+ctest --test-dir build/server --output-on-failure
+./build/server/minidb_server --data-dir data-api --port 8080
+```
+
+같은 데이터 디렉터리에 기존 CLI와 서버를 동시에 실행하지 않는다. 기존 `make test`와 Phase 2 벤치마크 명령은 그대로 사용할 수 있다.
