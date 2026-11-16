@@ -1,10 +1,20 @@
 #include "engine.hpp"
 
 #include "c_api.hpp"
+#include "writer_preferred_gate.hpp"
+
+#ifdef MINIDB_BENCH_SERIAL
+#include "benchmarks/serial_gate.hpp"
+#elif defined(MINIDB_BENCH_FAIR)
+#include "benchmarks/fair_gate.hpp"
+#endif
+
+#ifdef MINIDB_TEST_ACCESS
+#include "tests/test_access.hpp"
+#endif
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -22,48 +32,13 @@ std::uint64_t microseconds_since(Clock::time_point start) noexcept {
         std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count());
 }
 
-// Unlike std::shared_mutex, this gate explicitly prevents new readers from
-// bypassing an already waiting writer. Existing readers finish their statements.
-class WriterPreferredGate {
-public:
-    void lock_shared() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this] { return !writer_ && waiting_writers_ == 0; });
-        ++readers_;
-    }
-
-    void unlock_shared() noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (--readers_ == 0) cv_.notify_all();
-    }
-
-    void lock() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        ++waiting_writers_;
-        try {
-            cv_.wait(lock, [this] { return !writer_ && readers_ == 0; });
-        } catch (...) {
-            --waiting_writers_;
-            cv_.notify_all();
-            throw;
-        }
-        --waiting_writers_;
-        writer_ = true;
-    }
-
-    void unlock() noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        writer_ = false;
-        cv_.notify_all();
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::size_t readers_ = 0;
-    std::size_t waiting_writers_ = 0;
-    bool writer_ = false;
-};
+#ifdef MINIDB_BENCH_SERIAL
+using EngineGate = detail::SerialGate;
+#elif defined(MINIDB_BENCH_FAIR)
+using EngineGate = detail::FairGate;
+#else
+using EngineGate = detail::WriterPreferredGate;
+#endif
 
 struct TableDeleter {
     void operator()(Table* table) const noexcept {
@@ -91,6 +66,12 @@ struct StatementOwner {
     StatementOwner& operator=(const StatementOwner&) = delete;
 };
 
+struct LockMetrics {
+    std::atomic<std::uint64_t> count{0};
+    std::atomic<std::uint64_t> total_us{0};
+    std::atomic<std::uint64_t> max_us{0};
+};
+
 struct Metrics {
     std::atomic<std::uint64_t> requests{0};
     std::atomic<std::uint64_t> successful_inserts{0};
@@ -101,6 +82,7 @@ struct Metrics {
     std::atomic<std::uint64_t> current_executions{0};
     std::atomic<std::uint64_t> peak_executions{0};
     std::atomic<std::uint64_t> lock_wait_us{0};
+    std::array<LockMetrics, static_cast<std::size_t>(LockKind::Count)> lock_wait;
     std::atomic<std::uint64_t> execution_us{0};
 };
 
@@ -214,18 +196,24 @@ struct Engine::Impl {
         return executor_run(table, &statement, &sink, &error);
     }
 
-    void add_wait(Clock::time_point started) noexcept {
-        metrics.lock_wait_us.fetch_add(microseconds_since(started), std::memory_order_relaxed);
+    void add_wait(Clock::time_point started, LockKind kind) noexcept {
+        const auto elapsed = microseconds_since(started);
+        auto& metric = metrics.lock_wait[static_cast<std::size_t>(kind)];
+        metric.count.fetch_add(1, std::memory_order_relaxed);
+        metric.total_us.fetch_add(elapsed, std::memory_order_relaxed);
+        auto maximum = metric.max_us.load(std::memory_order_relaxed);
+        while (maximum < elapsed && !metric.max_us.compare_exchange_weak(
+                   maximum, elapsed, std::memory_order_relaxed)) {}
+        metrics.lock_wait_us.fetch_add(elapsed, std::memory_order_relaxed);
     }
 
-    // Every reader index and the writer index are built from the same file at
-    // construction, and IDs only grow (last_id + 1). Hence any ID below the
-    // first ID inserted since then was either present at startup, and so in
-    // every reader index, or never existed. Only IDs at or above it can be
-    // missing from a reader snapshot. Call while holding the shared gate.
+    // Startup indexes cover old rows. Only successful post-startup INSERTs can
+    // add rows missing from a reader snapshot. Read both bounds under the shared
+    // gate: separate atomic loads alone would not guarantee a consistent range.
     bool may_be_inserted_since_startup(std::int64_t id) const noexcept {
         const auto first = first_insert_id.load(std::memory_order_acquire);
-        return first != 0 && id >= first;
+        const auto last = last_insert_id.load(std::memory_order_acquire);
+        return first != 0 && id >= first && id <= last;
     }
 
     bool available(QueryResult& result) const {
@@ -293,11 +281,11 @@ struct Engine::Impl {
                 return;
             }
             auto wait_started = Clock::now();
-            std::unique_lock<WriterPreferredGate> write_gate(gate);
-            add_wait(wait_started);
+            std::unique_lock<EngineGate> write_gate(gate);
+            add_wait(wait_started, LockKind::WriteGate);
             wait_started = Clock::now();
             std::unique_lock<std::mutex> writer_lock(writer_mutex);
-            add_wait(wait_started);
+            add_wait(wait_started, LockKind::InsertWriterMutex);
             if (!available(result)) return;
 
             const ResultSink sink{record_insert, nullptr, &result};
@@ -308,6 +296,7 @@ struct Engine::Impl {
                 if (first_insert_id.load(std::memory_order_relaxed) == 0) {
                     first_insert_id.store(result.inserted_id, std::memory_order_release);
                 }
+                last_insert_id.store(result.inserted_id, std::memory_order_release);
                 result.status = QueryStatus::Ok;
                 return;
             }
@@ -330,10 +319,10 @@ struct Engine::Impl {
         auto& reader = *readers[worker_index];
         auto wait_started = Clock::now();
         std::unique_lock<std::mutex> reader_lock(reader.mutex);
-        add_wait(wait_started);
+        add_wait(wait_started, LockKind::ReaderMutex);
         wait_started = Clock::now();
-        std::shared_lock<WriterPreferredGate> read_gate(gate);
-        add_wait(wait_started);
+        std::shared_lock<EngineGate> read_gate(gate);
+        add_wait(wait_started, LockKind::ReadGate);
         if (!available(result)) return;
 
         RowCollector collector{result, options};
@@ -351,7 +340,7 @@ struct Engine::Impl {
                 // Always take locks in gate -> writer_mutex order.
                 wait_started = Clock::now();
                 std::unique_lock<std::mutex> writer_lock(writer_mutex);
-                add_wait(wait_started);
+                add_wait(wait_started, LockKind::FallbackMutex);
                 if (!available(result)) return;
                 metrics.fallbacks.fetch_add(1, std::memory_order_relaxed);
                 rc = run_c(writer.get(), statement, sink, error);
@@ -382,13 +371,21 @@ struct Engine::Impl {
     EngineOptions options;
     TableHandle writer;
     std::vector<std::unique_ptr<Reader>> readers;
-    WriterPreferredGate gate;
+    EngineGate gate;
     std::mutex writer_mutex;
     std::atomic<bool> is_healthy{true};
-    // ID of the first successful INSERT since construction; 0 until then.
+    // Inclusive successful INSERT range since construction; both 0 until then.
+    // Updated together under the exclusive gate, read under the shared gate.
     std::atomic<std::int64_t> first_insert_id{0};
+    std::atomic<std::int64_t> last_insert_id{0};
     Metrics metrics;
 };
+
+#ifdef MINIDB_TEST_ACCESS
+GateSnapshot EngineTestAccess::snapshot(Engine& engine) {
+    return detail::GateTestAccess::snapshot(engine.impl_->gate);
+}
+#endif
 
 Engine::Engine(const EngineOptions& options) : impl_(std::make_unique<Impl>(options)) {}
 Engine::~Engine() = default;
@@ -413,6 +410,11 @@ EngineStats Engine::stats() const {
     out.current_executions = metrics.current_executions.load(std::memory_order_relaxed);
     out.peak_executions = metrics.peak_executions.load(std::memory_order_relaxed);
     out.lock_wait_us = metrics.lock_wait_us.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < out.lock_wait.size(); ++i) {
+        out.lock_wait[i].count = metrics.lock_wait[i].count.load(std::memory_order_relaxed);
+        out.lock_wait[i].total_us = metrics.lock_wait[i].total_us.load(std::memory_order_relaxed);
+        out.lock_wait[i].max_us = metrics.lock_wait[i].max_us.load(std::memory_order_relaxed);
+    }
     out.execution_us = metrics.execution_us.load(std::memory_order_relaxed);
     return out;
 }

@@ -1,0 +1,381 @@
+[
+  {
+    "dataset": "fair",
+    "scenario": "write90",
+    "workers": 8,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 13089.633333333333,
+    "rps_min": 12964.1,
+    "rps_max": 13474.433333333332,
+    "errors": {},
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 2.0294876254614467,
+    "lag_p99_median_ms": 0.015901000097073847,
+    "startup_median_s": 0.9264835330004644,
+    "rss_median_bytes": 327659520,
+    "classes": {
+      "old": {
+        "p50_ms": 3.9031280002745916,
+        "p95_ms": 10.97813300020789,
+        "p99_ms": 16.36394399974961,
+        "scheduled_p99_ms": 16.37014400012049,
+        "successful_min": 38691
+      },
+      "write": {
+        "p50_ms": 2.109424000082072,
+        "p95_ms": 2.7880140000888787,
+        "p99_ms": 3.439600999627146,
+        "scheduled_p99_ms": 3.4449989998392994,
+        "successful_min": 350264
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.01074018852189735,
+      "read_gate": 2946.2972126051905,
+      "write_gate": 242.06410024069092,
+      "insert_writer_mutex": 0.003843068741209564,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 1537.7494557204734
+  },
+  {
+    "dataset": "fair",
+    "scenario": "write99",
+    "workers": 8,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 13170.1,
+    "rps_min": 12862.9,
+    "rps_max": 13280.9,
+    "errors": {},
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 1.9934663636575753,
+    "lag_p99_median_ms": 0.012200000128359534,
+    "startup_median_s": 0.9004039530000227,
+    "rss_median_bytes": 328577024,
+    "classes": {
+      "old": {
+        "p50_ms": 16.678358000717708,
+        "p95_ms": 81.9091989997105,
+        "p99_ms": 124.3469199998799,
+        "scheduled_p99_ms": 124.35521999987031,
+        "successful_min": 3885
+      },
+      "write": {
+        "p50_ms": 2.121317999808525,
+        "p95_ms": 2.769359000012628,
+        "p99_ms": 3.310087000045314,
+        "scheduled_p99_ms": 3.313989999696787,
+        "successful_min": 382034
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.016560509554140127,
+      "read_gate": 24333.057834394906,
+      "write_gate": 272.31613200071575,
+      "insert_writer_mutex": 0.003844482503003502,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 1547.0436255963152
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 2,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 6.666666666666667,
+    "rps_min": 6.5,
+    "rps_max": 6.833333333333333,
+    "errors": {
+      "QUEUE_TIMEOUT": 3
+    },
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.002631465569356643,
+    "lag_p99_median_ms": 0.032002000352804316,
+    "startup_median_s": 0.3126222340001732,
+    "rss_median_bytes": 108670976,
+    "classes": {
+      "scan": {
+        "p50_ms": 4748.1046950001655,
+        "p95_ms": 5192.7070130000175,
+        "p99_ms": 5298.503085999982,
+        "scheduled_p99_ms": 5298.509285999899,
+        "successful_min": 203
+      },
+      "write": {
+        "p50_ms": 4678.997160000108,
+        "p95_ms": 5023.097366000002,
+        "p99_ms": 5094.834835999791,
+        "scheduled_p99_ms": 5094.841535999876,
+        "successful_min": 20
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 6.19811320754717,
+      "write_gate": 158495.95454545456,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 4208182.310344827
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 2,
+    "rate": null,
+    "variant": "serial",
+    "rps_median": 3.7666666666666666,
+    "rps_min": 3.6,
+    "rps_max": 3.8,
+    "errors": {
+      "QUEUE_TIMEOUT": 222
+    },
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.0017977034228467725,
+    "lag_p99_median_ms": 0.03120200017292518,
+    "startup_median_s": 0.30894120499988276,
+    "rss_median_bytes": 108761088,
+    "classes": {
+      "scan": {
+        "p50_ms": 5383.076528000402,
+        "p95_ms": 5529.1789780003455,
+        "p99_ms": 5580.572868999752,
+        "scheduled_p99_ms": 5580.579369999668,
+        "successful_min": 119
+      },
+      "write": {
+        "p50_ms": 5001.286658000026,
+        "p95_ms": 5253.768637000121,
+        "p99_ms": 5253.768637000121,
+        "scheduled_p99_ms": 5253.773636999995,
+        "successful_min": 8
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 263581.22764227644,
+      "write_gate": 259910.5,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 4660871.5121951215
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 4,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 11.733333333333333,
+    "rps_min": 11.6,
+    "rps_max": 11.766666666666667,
+    "errors": {},
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.004365799663851445,
+    "lag_p99_median_ms": 0.030201999834389426,
+    "startup_median_s": 0.537600766000196,
+    "rss_median_bytes": 177045504,
+    "classes": {
+      "scan": {
+        "p50_ms": 2681.401797000035,
+        "p95_ms": 3026.7663559998255,
+        "p99_ms": 3198.4173539999574,
+        "scheduled_p99_ms": 3198.424753999916,
+        "successful_min": 340
+      },
+      "write": {
+        "p50_ms": 2587.986088999969,
+        "p95_ms": 2868.6739150002722,
+        "p99_ms": 2918.416096999863,
+        "scheduled_p99_ms": 2918.420696999874,
+        "successful_min": 38
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 21656.35465116279,
+      "write_gate": 226333.375,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 2291061.7578125
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 4,
+    "rate": null,
+    "variant": "serial",
+    "rps_median": 3.7,
+    "rps_min": 3.4,
+    "rps_max": 3.8666666666666667,
+    "errors": {
+      "QUEUE_TIMEOUT": 197
+    },
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.0019190130036628517,
+    "lag_p99_median_ms": 0.038302000120893354,
+    "startup_median_s": 0.47351218499989045,
+    "rss_median_bytes": 176910336,
+    "classes": {
+      "scan": {
+        "p50_ms": 5757.606468000176,
+        "p95_ms": 6243.053468999733,
+        "p99_ms": 6613.955196999996,
+        "scheduled_p99_ms": 6613.963197999965,
+        "successful_min": 113
+      },
+      "write": {
+        "p50_ms": 5659.782695999638,
+        "p95_ms": 5940.387937000196,
+        "p99_ms": 5940.387937000196,
+        "scheduled_p99_ms": 5940.3938370001015,
+        "successful_min": 10
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 804224.6106194691,
+      "write_gate": 835218.4705882353,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 4540466.140703518
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 8,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 18.133333333333333,
+    "rps_min": 17.766666666666666,
+    "rps_max": 18.5,
+    "errors": {},
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.00761085351869287,
+    "lag_p99_median_ms": 0.028400999781297287,
+    "startup_median_s": 0.9523799969997526,
+    "rss_median_bytes": 313237504,
+    "classes": {
+      "scan": {
+        "p50_ms": 1715.4850819997591,
+        "p95_ms": 2166.8402790000982,
+        "p99_ms": 2424.8239210000975,
+        "scheduled_p99_ms": 2424.830022000151,
+        "successful_min": 512
+      },
+      "write": {
+        "p50_ms": 1554.2100060001758,
+        "p95_ms": 1913.0790469998828,
+        "p99_ms": 2001.811767000163,
+        "scheduled_p99_ms": 2001.816467000026,
+        "successful_min": 53
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.01160541586073501,
+      "read_gate": 60899.73046875,
+      "write_gate": 226763.5,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 1270929.7864583333
+  },
+  {
+    "dataset": "scan",
+    "scenario": "scan_write",
+    "workers": 8,
+    "rate": null,
+    "variant": "serial",
+    "rps_median": 3.6666666666666665,
+    "rps_min": 3.466666666666667,
+    "rps_max": 3.7666666666666666,
+    "errors": {
+      "QUEUE_TIMEOUT": 120
+    },
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.0017113554340751377,
+    "lag_p99_median_ms": 0.037801999951625476,
+    "startup_median_s": 0.9604172680001284,
+    "rss_median_bytes": 313278464,
+    "classes": {
+      "scan": {
+        "p50_ms": 6816.397529999904,
+        "p95_ms": 7460.00041499974,
+        "p99_ms": 8947.926873000142,
+        "scheduled_p99_ms": 8947.933073000058,
+        "successful_min": 120
+      },
+      "write": {
+        "p50_ms": 6550.201827999899,
+        "p95_ms": 7246.335089999775,
+        "p99_ms": 7246.335089999775,
+        "scheduled_p99_ms": 7246.340189999955,
+        "successful_min": 12
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 1844299.9919354839,
+      "write_gate": 2064918.4666666666,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 4362551.568181818
+  },
+  {
+    "dataset": "scan-w1",
+    "scenario": "scan_write",
+    "workers": 1,
+    "rate": null,
+    "variant": "parallel",
+    "rps_median": 3.7333333333333334,
+    "rps_min": 3.7,
+    "rps_max": 3.8,
+    "errors": {
+      "QUEUE_TIMEOUT": 242
+    },
+    "not_submitted": 0,
+    "unacknowledged_persisted_rows": 0,
+    "client_cpu_median": 0.0018757792741620656,
+    "lag_p99_median_ms": 0.018800999896484427,
+    "startup_median_s": 0.20622511999999915,
+    "rss_median_bytes": 74616832,
+    "classes": {
+      "scan": {
+        "p50_ms": 5027.131865999763,
+        "p95_ms": 5276.072663999912,
+        "p99_ms": 5293.668256000274,
+        "scheduled_p99_ms": 5293.670556000052,
+        "successful_min": 117
+      },
+      "write": {
+        "p50_ms": 4754.148417000124,
+        "p95_ms": 4985.9944580002775,
+        "p99_ms": 4985.9944580002775,
+        "scheduled_p99_ms": 4986.000557999887,
+        "successful_min": 12
+      }
+    },
+    "lock_mean_us": {
+      "reader_mutex": 0.0,
+      "read_gate": 0.0,
+      "write_gate": 0.0,
+      "insert_writer_mutex": 0.0,
+      "fallback_mutex": null
+    },
+    "queue_mean_us": 4668819.644549763
+  }
+]

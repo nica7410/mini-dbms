@@ -11,6 +11,7 @@ Phase 3는 기존 `src/common.c`, `parser.c`, `storage.c`, `executor.c`, `bptree
 | `server/main.cpp` | CLI 옵션, DB 디렉터리 잠금, HTTP API, JSON 계약, 종료 순서 |
 | `server/engine.hpp`, `engine.cpp` | C ABI adapter, 요청별 파싱, 테이블 컨텍스트, DB 동시성 제어, 결과 소유권 |
 | `server/c_api.hpp` | 원본 C 헤더의 링크 경계 |
+| `server/writer_preferred_gate.hpp` | 내부 쓰기 우선 gate, 공유/배타 진입 조건 |
 | `server/thread_pool.hpp`, `thread_pool.cpp` | 고정 worker, FIFO 대기열, 수락 제한, 종료·join, 계측 |
 | `server/CMakeLists.txt` | C17/C++17 분리 빌드, CTest, sanitizer 옵션 |
 | `server/cmake/DrogonDependency.cmake` | Drogon 커밋 고정 또는 설치된 패키지 연결 |
@@ -56,7 +57,7 @@ reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같�
 
 ### 읽기·쓰기 gate
 
-`WriterPreferredGate`는 다음 규칙을 적용한다.
+내부 헤더의 `WriterPreferredGate`는 다음 규칙을 적용한다. 별도 단위 테스트에서는 실제 writer 대기 등록 상태를 관찰해 순서를 검증하며, 운영 코드에 테스트용 정지 callback은 넣지 않는다.
 
 - SELECT는 공유 gate를 획득한다. 서로 다른 reader에서는 동시에 기존 executor를 실행할 수 있다.
 - INSERT는 독점 gate를 획득한다. 실행 중인 SELECT가 끝난 뒤 시작하며, 쓰기 중에는 새 SELECT가 실행되지 않는다.
@@ -69,13 +70,15 @@ reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같�
 
 reader 인덱스는 열 때 구축한 상태를 유지한다. 현재 엔진은 append-only이므로 기존 ID의 파일 위치는 바뀌지 않는다. 따라서 reader 인덱스가 찾은 ID는 기존 위치를 그대로 사용한다.
 
-reader 인덱스가 ID를 찾지 못하면 같은 SQL을 writer 컨텍스트에서 다시 실행한다. 이때 공유 gate를 유지하여 INSERT가 끼어들지 못하게 하고, writer mutex로 writer의 파일 커서를 보호한다. 실제 읽기 오류는 정상적인 인덱스 miss로 취급하지 않는다.
+reader 인덱스가 ID를 찾지 못하면 아래 성공 INSERT 범위를 확인하고, 필요한 경우에만 같은 SQL을 writer 컨텍스트에서 다시 실행한다. 이때 공유 gate를 유지하여 INSERT가 끼어들지 못하게 하고, writer mutex로 writer의 파일 커서를 보호한다. 실제 읽기 오류는 정상적인 인덱스 miss로 취급하지 않는다.
 
 이 방식으로 새로 INSERT한 ID를 다음 SELECT에서 찾을 수 있다. reader 인덱스를 실시간으로 복제하거나 새 행마다 전체 인덱스를 재구축하지 않는다.
 
-miss가 났다고 해서 모두 writer로 보내지는 않는다. adapter는 서버 시작 이후 처음 성공한 INSERT의 ID(`first_insert_id`)를 기록한다. writer와 모든 reader는 시작할 때 같은 파일로 인덱스를 만들고, ID는 `last_id + 1`로만 증가한다. 따라서 `first_insert_id`보다 작은 ID는 시작 시점에 이미 있었거나(그러면 모든 reader 인덱스에 있다) 처음부터 없던 ID다. 이런 miss와 INSERT가 아직 없을 때의 miss는 writer를 거치지 않고 빈 결과로 끝낸다. `first_insert_id`는 독점 gate 안에서만 쓰고 공유 gate 안에서 읽으므로 판정 중에 바뀌지 않는다.
+miss가 났다고 해서 모두 writer로 보내지는 않는다. adapter는 서버 시작 이후 처음 성공한 INSERT의 ID(`first_insert_id`)와 마지막 성공 ID(`last_insert_id`)를 기록한다. writer와 모든 reader는 시작할 때 같은 파일로 인덱스를 만들고, ID는 `last_id + 1`로만 증가한다. 따라서 `first_insert_id`보다 작은 ID의 miss는 처음부터 없던 행이고, `last_insert_id`보다 큰 ID는 아직 삽입하지 않은 행이다. 이런 miss와 INSERT가 아직 없을 때의 miss는 writer를 거치지 않고 빈 결과로 끝낸다.
 
-fallback은 `first_insert_id` 이상인 ID의 miss에만 남는다. 시작 이후 삽입된 ID와 아직 부여되지 않은 큰 ID가 여기에 해당하며, 이 조회는 writer mutex에서 직렬화된다.
+두 경계는 성공한 INSERT의 독점 gate 안에서 갱신하고 SELECT의 공유 gate 안에서 함께 읽는다. 각 값이 atomic이라는 사실만으로 일관된 범위가 보장되는 것은 아니다. 실패한 INSERT는 범위를 바꾸지 않으며, 쓰기 실패로 엔진이 사용 불가가 되면 범위 판정보다 먼저 요청을 거절한다. 재시작 시 두 값은 0으로 초기화하고 이전 행들은 다시 구축한 reader 인덱스에서 찾는다.
+
+fallback은 `first_insert_id <= 조회 ID <= last_insert_id`인 miss에만 남는다. 현재의 추가 전용·단일 writer 조건에서는 실제로 삽입된 신규 ID들이지만, 실제 writer 조회와 오류 검사를 생략하지 않는다. 이 조회는 writer mutex에서 직렬화된다. 상한은 성공 콜백의 ID를 그대로 저장하므로 범위 계산에 덧셈을 추가하지 않는다.
 
 전체 조회·age 조회는 reader의 파일을 새로 탐색한다. 읽는 동안 INSERT가 막히므로 하나의 SELECT 실행 중 파일이 추가되지 않는다. 이 성질은 모든 접근이 이 서버를 통한다는 조건에서 성립한다.
 
@@ -145,26 +148,32 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 | `engine.requests` | adapter의 `execute` 호출 수. 만료된 요청은 포함하지 않음 |
 | `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과 |
 | `engine.fallbacks` | reader ID miss 뒤 writer 인덱스를 조회한 수 |
-| `engine.fallbacks_skipped` | reader ID miss 중 서버 시작 이후 성공한 INSERT가 아직 없거나, 조회 ID가 첫 성공 INSERT의 ID(`first_insert_id`)보다 작아서 writer 재조회 없이 빈 결과로 끝난 수 |
+| `engine.fallbacks_skipped` | reader ID miss 중 서버 시작 이후 성공한 INSERT가 아직 없거나, 조회 ID가 성공 INSERT 범위(`[first_insert_id, last_insert_id]`) 밖이라서 writer 재조회 없이 빈 결과로 끝난 수 |
 | `engine.current_executions`, `peak_executions` | 기존 `executor_run` 호출 범위의 현재·최대 중첩 수 |
 | `engine.lock_wait_us` | reader mutex, gate, writer mutex의 누적 대기 |
+| `engine.lock_wait.<종류>.count` | 해당 잠금의 성공한 획득 횟수. 경합 없이 획득한 경우도 포함 |
+| `engine.lock_wait.<종류>.total_us`, `max_us` | 획득 직전→직후의 누적·최대 시간. 보유 시간 제외 |
 | `engine.execution_us` | 기존 executor 호출에 쓴 누적 시간. fallback도 별도 호출로 포함 |
 
-engine 카운터는 각각 atomic으로 읽으므로 실행 중인 snapshot에서 모든 수가 정확히 같은 순간의 상태를 나타내지는 않는다. `peak_executions > 1`은 executor 호출이 중첩됐음을 보여주지만, 단일 SQL을 병렬화했거나 처리량이 개선됐다는 증거는 아니다.
+잠금 종류는 `reader_mutex`, `read_gate`, `write_gate`, `insert_writer_mutex`, `fallback_mutex`다. `count`를 실제 경합 횟수로 해석하지 않는다. 평균 획득 시간은 count가 양수일 때 `total_us / count`로 계산하며, microsecond 미만 시간은 0이 될 수 있다. 모든 작업이 끝나면 다섯 `total_us`의 합과 기존 `lock_wait_us`가 일치한다.
+
+engine 카운터는 각각 atomic으로 읽으므로 실행 중인 snapshot에서 모든 수가 정확히 같은 순간의 상태를 나타내지는 않는다. 최대값은 가산 카운터가 아니므로 두 snapshot의 차이를 측정 구간의 최대 대기로 해석하지 않는다. `peak_executions > 1`은 executor 호출이 중첩됐음을 보여주지만, 단일 SQL을 병렬화했거나 처리량이 개선됐다는 증거는 아니다.
 
 ## 8. 성능의 범위와 비용
 
 현재 선택은 Phase 1·2를 변경하지 않고 독립 SELECT를 병렬로 실행하기 위한 방법이다. 다음 비용을 감수한다.
 
 - `W`개 worker를 위해 `W + 1`회 테이블을 열고 각각 B+ 트리를 구축한다. 데이터가 크면 초기화 시간과 인덱스 메모리도 그 수에 영향을 받는다.
-- 시작 이후의 ID는 reader 인덱스에 없으므로 그 ID와 아직 부여되지 않은 큰 ID의 조회는 writer fallback으로 모일 수 있다. 시작 시점보다 오래된 범위의 없는 ID는 fallback 없이 처리한다.
+- 시작 이후 실제로 삽입한 ID는 reader 인덱스에 없으므로 writer fallback으로 모일 수 있다. 성공 INSERT 범위 밖의 없는 ID는 fallback 없이 처리한다. 이 최적화는 writer 접근을 줄이지만 HTTP 처리량 개선 정도는 별도 측정해야 한다.
 - 긴 순차 탐색은 writer를 기다리게 한다. writer가 대기하면 이후 reader도 gate에서 기다린다.
 - 파일 읽기, 결과 복사, JSON 직렬화와 HTTP 전송 비용은 인덱스 검색 시간과 별개다.
 - 결과·대기열 제한은 과도한 단일 요청과 대기열 증가를 제어하지만 프로세스 전체 메모리 사용량을 정확한 상한으로 제한하지 않는다.
 
 따라서 서버 worker 수별 처리량·p50/p95/p99·오류율·queue/lock 대기·메모리·startup 시간은 실제 workload로 측정해야 한다. 기존 Phase 2의 100만 건 ID/age 조회 수치는 C 엔진 성능 근거이며 HTTP 서버의 성능 측정값으로 전용하지 않는다.
 
-실제 완료한 검증과 환경은 아래 10절에 기록한다. 기능 검증과 성능 benchmark는 구별한다.
+초기 구현의 검증 기록은 아래 10절, 후속 변경의 재검증 상태는 11절에 기록한다. 기능 검증과 성능 benchmark는 구별한다.
+
+후속 개선용 부하 생성기와 별도 직렬 gate 서버는 [벤치마크 실행 설명](../server/benchmarks/README.md)에 있다. 직렬 비교군도 같은 W개의 reader를 유지하므로 단일 Table의 메모리 절감 비교가 아니다. 요청별 HTTP 지연은 클라이언트에서 측정하며 성공 지연, 오류/거절, generator lag, 아직 완료하지 못한 요청을 구분한다. 실제 새 실행 결과와 진행 상태는 `docs/phase3-benchmarks/` 및 [개선 계획](plans/phase3-improvements/README.md)에 기록한다.
 
 ## 9. 의존성 선택
 
@@ -178,7 +187,9 @@ JSON은 Drogon과 함께 사용하는 JsonCpp로 처리한다. DB는 이 라이�
 
 Phase 3의 기본 재현 경로는 Linux/WSL와 Docker다. 원래 Phase 1·2의 Windows 빌드를 보존하지만, 그것만으로 새 C++ 서버의 모든 Windows toolchain 조합까지 검증했다는 뜻은 아니다.
 
-## 10. 실제 검증 기록
+## 10. 초기 구현의 검증 기록
+
+이 절은 기존 문서에 남아 있던 초기 실행 기록이다. 아래의 sanitizer 통과 결과와 테스트 수를 현재 후속 수정본의 재검증 결과로 해석하지 않는다.
 
 2026-11-16에 Linux에서 GCC/G++ 14.2.0, CMake 3.31.10, Drogon v1.9.14, JsonCpp 1.9.6으로 확인했다. HTTP 서버는 Release 빌드로 검증했고, sanitizer는 별도 실행 파일을 사용했다.
 
@@ -210,3 +221,20 @@ Phase 3의 기본 재현 경로는 Linux/WSL와 Docker다. 원래 Phase 1·2의 
 HTTP 통합 테스트에는 잘못된 입력의 INSERT 부작용 방지, 결과·큐 상한, 큐 대기 만료, 두 서버의 동일 디렉터리 접근 차단, 정상 종료 중 수락한 INSERT 처리, 재시작, 64비트 ID와 잘못된 저장 UTF-8 처리가 포함된다. 저장 쓰기 오류 후의 사용 불가 상태는 엔진 테스트에서 실제 파일 크기 제한으로 검증했다.
 
 LeakSanitizer는 실행 환경의 ptrace 제약 때문에 실행할 수 없어 메모리 누수 검증 결과에는 포함하지 않는다. HTTP 프레임워크 전체에 sanitizer를 적용한 검증, Docker 이미지 실행, Windows 네이티브 서버 빌드는 이번 검증 범위에 포함하지 않았다.
+
+## 11. 후속 개선 검증 — 2026-11-16
+
+`2cccc9b` 이후 미커밋 변경에 대해 Debian bookworm/GCC 12.2/CMake 3.25.1 컨테이너에서 fallback 상한, 확정적 동시성 테스트, 잠금별 지표를 검증했다. Release CTest 6개 suite(일반 API 9개, 제어 API 2개 포함)가 통과했다. 기존 `make test`의 C 검사 30,407건과 CLI 28개도 통과했다. 직렬 비교 서버의 INSERT·재시작, 미래 ID 가시성, 잠금 지표 API 검사 3개도 통과했다.
+
+기본 컨테이너(WSL2 커널)의 TSan은 빌드 뒤 `unexpected memory mapping`으로 테스트 본문 전에 종료된다. 그래서 컨테이너를 `--security-opt seccomp=unconfined`로 띄우고 각 테스트를 `setarch "$(uname -m)" -R`로 실행해 해당 프로세스의 ASLR만 껐다. 이 조건에서 `minidb_gate_test`, `minidb_engine_test`, `minidb_engine_gate_test`, `minidb_pool_test`가 모두 통과했고 TSan 경고는 0건이었다. 자세한 내용은 [최소 검증 결과](phase3-benchmarks/20261116/minimal-report.md)에 있다. 이번 후속 작업에서는 ASan/UBSan을 새로 실행하지 않았다. 테스트 변경의 검출력은 gate 우선순위 제거, 엔진 공유 잠금 조기 해제, 종료 시 drain 생략의 세 의도적 변형이 각각 실패하는 것으로 확인했다.
+
+성능 비교는 [축소 계획](plans/phase3-improvements/05-minimal-verification.md)에 따라 27개 조건만 측정했다.
+
+- **스캔·쓰기 혼합:** 병렬 서버의 처리량이 worker 1·2·4·8에서 3.7·6.7·11.7·18.1 RPS였다. worker 8에서는 직렬 서버의 4.9배다.
+- **비용:** RSS가 75MB에서 313MB로, 시작 시간이 0.21초에서 0.95초로 worker 수에 비례해 늘었다.
+- **공정성:** worker 8에 쓰기 99% 포화 부하를 걸면 읽기 p99가 120–131ms로 쓰기 p99(약 3.3ms)의 약 38배였다. 읽기가 멈추지는 않았다(최장 무진행 구간 0.11초).
+  - 그래서 도착 순서(티켓) gate 후보를 벤치마크 전용 빌드로 비교했다.
+  - 후보는 읽기 p99를 4.4ms로 줄였지만 처리량이 34% 줄고 쓰기 p99가 30% 늘었다.
+  - 채택하지 않고 현재 쓰기 우선 정책을 유지한다.
+
+결과는 [최소 검증 결과](phase3-benchmarks/20261116/minimal-report.md)에 있다.

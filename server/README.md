@@ -179,12 +179,14 @@ HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한�
 
 - 서로 다른 reader 컨텍스트의 SELECT는 병렬로 실행할 수 있다. 같은 `FILE*`를 여러 thread가 공유하지 않는다.
 - INSERT는 한 writer 컨텍스트에서 직렬화하며, INSERT 실행 중에는 SELECT를 실행하지 않는다.
-- reader의 B+ 트리는 서버 시작 시점의 인덱스다. ID 조회가 정상적으로 끝났지만 행을 찾지 못한 경우, 시작 이후 성공한 INSERT가 아직 없거나 조회 ID가 첫 성공 INSERT의 ID(`first_insert_id`)보다 작으면 재조회 없이 빈 결과를 반환한다. 그 외의 miss는 writer 인덱스에 재조회하며, 이 재조회는 writer mutex를 공유한다.
+- reader의 B+ 트리는 서버 시작 시점의 인덱스다. ID 조회가 정상적으로 끝났지만 행을 찾지 못한 경우, 시작 이후 성공한 INSERT가 아직 없거나 조회 ID가 성공 INSERT 범위(`first_insert_id` 이상, `last_insert_id` 이하) 밖이면 재조회 없이 빈 결과를 반환한다. 범위 안의 miss만 writer 인덱스에 재조회하며, 이 재조회는 writer mutex를 공유한다. 실패한 INSERT는 범위를 바꾸지 않으며, 재시작하면 이전 행들이 reader 인덱스에 포함되고 범위는 초기화된다.
 - worker가 `W`개면 writer를 포함하여 `W + 1`개의 테이블 컨텍스트와 인덱스를 구축한다. worker를 늘리면 초기화 시간과 메모리도 늘어난다.
 - 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, UPDATE/DELETE, 페이지네이션은 제공하지 않는다.
 - TSV 쓰기는 기존 엔진의 `fflush` 계약을 사용한다. WAL·`fsync`·crash recovery를 추가한 것은 아니다.
 
 Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다. 새 ID 조회의 fallback, 긴 순차 탐색, 메모리 복제, 쓰기 비중과 저장 장치가 성능에 영향을 준다. `peak_active`는 worker 활동 수이고, `engine.peak_executions`는 기존 `executor_run`의 동시 진입 수다. 어느 값도 단독으로 속도 향상을 증명하지 않는다.
+
+`/metrics`의 `engine.lock_wait`는 `reader_mutex`, `read_gate`, `write_gate`, `insert_writer_mutex`, `fallback_mutex`별 `count`, `total_us`, `max_us`를 제공한다. count는 경합 여부와 무관한 성공 획득 횟수이며 시간은 잠금 보유 시간을 제외한다. 기존 `engine.lock_wait_us`는 전체 합계로 유지한다. 요청 p95/p99는 이 합계에서 계산할 수 없으며, [부하 생성기](benchmarks/README.md)로 클라이언트 지연을 측정한다.
 
 ## 종료
 
@@ -200,6 +202,10 @@ Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다
 make test
 ctest --test-dir build/server --output-on-failure
 ```
+
+Linux/GNU·Clang 빌드에서는 gate, 엔진, 풀, 실제 C 호출 잠금 통합, 일반 HTTP, 제어 HTTP의 6개 suite를 실행한다. 제어 HTTP 테스트는 별도 `minidb_server_test`의 link wrapper와 pipe handshake로 첫 SQL을 붙잡고, 큐에 남은 작업의 SIGTERM drain 및 만료를 확인한다. 운영 `minidb_server`에는 이 제어 기능이 없다. 비지원 플랫폼에서는 POSIX/link-wrapper 통합 타깃을 생략하며 CMake가 이를 알린다.
+
+gate 테스트는 writer의 실제 대기 등록을 확인한 뒤 후속 reader의 진입 차단을 검증한다. 기존 풀 drain 테스트와 별개로 엔진의 C 호출 전체 잠금 유지, SIGTERM의 신규 요청 차단→drain→종료 연결을 검증한다. 제어 테스트의 실행 제한시간은 실패 정리를 위한 것이며 큰 파일이 느리게 읽힐 것이라는 가정으로 순서를 정하지 않는다.
 
 100만 행을 미리 적재한 TSV에서 병렬 전체 탐색 8건과 동시 INSERT·즉시 조회 64쌍을 검증하려면 다음을 실행한다. 임시 데이터만 사용하며 서버의 계측값도 출력한다. 이 검증은 처리량 비교 벤치마크가 아니다.
 
@@ -234,3 +240,12 @@ ctest --test-dir build/server-tsan --output-on-failure
 ```
 
 TSan 실행에는 해당 runtime이 동작하는 OS·메모리 매핑 환경이 필요하다. HTTP API까지 계측하려면 별도의 sanitizer 빌드에서 `MINIDB_BUILD_HTTP`를 켠다. 기존 Phase 2 벤치마크 수치를 Phase 3 HTTP 서버의 측정값으로 사용하지 않는다.
+
+WSL2 커널의 Docker에서는 TSan 런타임이 `FATAL: ThreadSanitizer: unexpected memory mapping`으로 테스트 본문 전에 종료될 수 있다. 이 경우 검증 환경에서만 다음처럼 해당 테스트 프로세스의 ASLR을 끄고 실행한다.
+
+```sh
+docker run --security-opt seccomp=unconfined ...
+setarch "$(uname -m)" -R build/tsan/minidb_engine_test
+```
+
+2026-11-16 검증에서는 이 방법으로 gate·엔진·엔진 gate 통합·Thread Pool 테스트가 모두 통과했고 TSan 경고는 0건이었다. 결과는 [최소 검증 결과](../docs/phase3-benchmarks/20261116/minimal-report.md)에 있다.

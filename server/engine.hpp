@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -44,19 +45,31 @@ struct EngineOptions {
     std::size_t max_result_bytes = 8388608;
 };
 
+enum class LockKind : std::size_t {
+    ReaderMutex, ReadGate, WriteGate, InsertWriterMutex, FallbackMutex, Count
+};
+
+struct LockWaitStats {
+    std::uint64_t count = 0;
+    std::uint64_t total_us = 0;
+    std::uint64_t max_us = 0;
+};
+
 struct EngineStats {
     std::uint64_t requests = 0;
     std::uint64_t successful_inserts = 0;
     std::uint64_t successful_selects = 0;
     std::uint64_t errors = 0;
     std::uint64_t fallbacks = 0;
-    // Reader ID misses answered without the writer: the ID predates every insert
-    // since startup, so the reader's startup index is already authoritative.
+    // Reader ID misses outside the successful post-startup INSERT range (or
+    // before any INSERT), answered without consulting the writer.
     std::uint64_t fallbacks_skipped = 0;
     // These count executor_run calls, excluding parsing and lock waiting.
     std::uint64_t current_executions = 0;
     std::uint64_t peak_executions = 0;
     std::uint64_t lock_wait_us = 0;
+    // Successful acquisitions, including uncontended ones; time excludes holding.
+    std::array<LockWaitStats, static_cast<std::size_t>(LockKind::Count)> lock_wait{};
     std::uint64_t execution_us = 0;
 };
 
@@ -79,6 +92,7 @@ public:
     EngineStats stats() const;
 
 private:
+    friend struct EngineTestAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -403,6 +403,14 @@ int serve(const Options &options) {
         db["current_executions"] = Json::UInt64(database.current_executions);
         db["peak_executions"] = Json::UInt64(database.peak_executions);
         db["lock_wait_us"] = Json::UInt64(database.lock_wait_us);
+        const char* lock_names[] = {"reader_mutex", "read_gate", "write_gate", "insert_writer_mutex", "fallback_mutex"};
+        for (std::size_t i = 0; i < database.lock_wait.size(); ++i) {
+            const auto& metric = database.lock_wait[i];
+            auto& detail = db["lock_wait"][lock_names[i]];
+            detail["count"] = Json::UInt64(metric.count);
+            detail["total_us"] = Json::UInt64(metric.total_us);
+            detail["max_us"] = Json::UInt64(metric.max_us);
+        }
         db["execution_us"] = Json::UInt64(database.execution_us);
         callback(body_response(200, serialize(result)));
     }, {drogon::Get});

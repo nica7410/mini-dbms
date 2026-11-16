@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -123,7 +124,8 @@ void test_snapshot_fallback_and_eof() {
                 "reader that reached EOF did not observe the appended row");
         auto missing = engine.execute(1, "SELECT * FROM users WHERE id = 900;");
         require(missing.status == QueryStatus::Ok && missing.rows.empty(), "missing ID is not an empty success");
-        require(engine.stats().fallbacks == 2, "missing ID must consult the authoritative index");
+        require(engine.stats().fallbacks == 1 && engine.stats().fallbacks_skipped == 1,
+                "ID above the last insert must skip the writer");
         require(old.rows[0].name == "user1", "result retained a borrowed C row buffer");
         require(engine.healthy(), "successful requests damaged health state");
     }
@@ -135,7 +137,7 @@ void test_snapshot_fallback_and_eof() {
     require(reopened.stats().fallbacks == 0, "reopened reader index was not rebuilt");
 }
 
-void test_fallback_skips_ids_present_at_startup() {
+void test_fallback_only_within_inserted_range() {
     TempDirectory directory;
     {
         // IDs only need to increase, so a gap (3, 4) is a valid stored state.
@@ -176,7 +178,7 @@ void test_fallback_skips_ids_present_at_startup() {
     require(old.status == QueryStatus::Ok && old.rows.size() == 1 && old.rows[0].name == "c",
             "startup row was not served by its reader");
 
-    // IDs at or above the boundary may be newer than the snapshot.
+    // Both inclusive endpoints must reach the writer.
     auto fresh = lookup(0, 6);
     require(fresh.status == QueryStatus::Ok && fresh.rows.size() == 1 && fresh.rows[0].name == "new",
             "first inserted ID was not served through the writer");
@@ -184,10 +186,65 @@ void test_fallback_skips_ids_present_at_startup() {
     require(fresh.status == QueryStatus::Ok && fresh.rows.size() == 1 && fresh.rows[0].name == "newer",
             "later inserted ID was not served through the writer");
     expect_empty(0, 8, "unassigned ID was found");
+    expect_empty(1, 999999, "future ID above the inserted range was found");
     const auto stats = engine.stats();
-    require(stats.fallbacks == 3 && stats.fallbacks_skipped == 5,
-            "only IDs at or above the first insert may consult the writer");
+    require(stats.fallbacks == 2 && stats.fallbacks_skipped == 7,
+            "only IDs within the inserted range may consult the writer");
+
+    // A previously missing ID must become visible as soon as it is inserted.
+    auto third = engine.execute(0, "INSERT INTO users (name, age) VALUES ('now-present', 8);");
+    require(third.status == QueryStatus::Ok && third.inserted_id == 8, "third insert failed");
+    fresh = lookup(1, 8);
+    require(fresh.status == QueryStatus::Ok && fresh.rows.size() == 1 &&
+            fresh.rows[0].name == "now-present", "a skipped miss hid a later insert");
+    require(engine.stats().fallbacks == 3 && engine.stats().fallbacks_skipped == 7,
+            "expanded upper bound did not enable fallback for the new row");
     require(engine.healthy(), "skipped fallbacks damaged health state");
+}
+
+void test_inserted_range_at_int64_limit() {
+    TempDirectory directory;
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    {
+        std::ofstream file(directory.path / "users.tsv", std::ios::binary);
+        file << maximum - 1 << "\tprevious\t1\n";
+        file.close();
+        require(static_cast<bool>(file), "unable to write the INT64 boundary fixture");
+    }
+    const auto options = directory.options(2);
+    const std::string last_query = "SELECT * FROM users WHERE id = " + std::to_string(maximum) + ";";
+    {
+        Engine engine(options);
+        auto missing = engine.execute(0, last_query);
+        require(missing.status == QueryStatus::Ok && missing.rows.empty(), "unassigned INT64_MAX was found");
+        auto inserted = engine.execute(1, "INSERT INTO users (name, age) VALUES ('last', 2);");
+        require(inserted.status == QueryStatus::Ok && inserted.committed && inserted.inserted_id == maximum,
+                "last representable ID was not inserted");
+        auto found = engine.execute(0, last_query);
+        require(found.status == QueryStatus::Ok && found.rows.size() == 1 && found.rows[0].name == "last",
+                "range ending at INT64_MAX overflowed or excluded its endpoint");
+
+        const auto exhausted = engine.execute(0, "INSERT INTO users (name, age) VALUES ('overflow', 3);");
+        require(exhausted.status == QueryStatus::StorageError && !exhausted.committed && engine.healthy(),
+                "ID exhaustion changed the storage-health contract");
+        found = engine.execute(1, last_query);
+        require(found.status == QueryStatus::Ok && found.rows.size() == 1 && found.rows[0].id == maximum,
+                "failed insert damaged the successful range");
+        missing = engine.execute(0, "SELECT * FROM users WHERE id = 0;");
+        require(missing.status == QueryStatus::Ok && missing.rows.empty(), "ID 0 was found after exhaustion");
+        require(engine.stats().fallbacks == 2 && engine.stats().fallbacks_skipped == 2,
+                "boundary or failed insert changed fallback classification");
+    }
+    Engine reopened(options);
+    auto found = reopened.execute(1, last_query);
+    require(found.status == QueryStatus::Ok && found.rows.size() == 1 && reopened.stats().fallbacks == 0,
+            "restart did not move the last inserted row into the reader index");
+    const auto exhausted = reopened.execute(0, "INSERT INTO users (name, age) VALUES ('still-full', 4);");
+    require(exhausted.status == QueryStatus::StorageError && !exhausted.committed, "reopen allowed ID overflow");
+    auto missing = reopened.execute(0, "SELECT * FROM users WHERE id = 0;");
+    require(missing.status == QueryStatus::Ok && missing.rows.empty() &&
+            reopened.stats().fallbacks == 0 && reopened.stats().fallbacks_skipped == 1,
+            "failed first insert must leave the post-startup range empty");
 }
 
 void test_input_is_validated_before_writes() {
@@ -206,11 +263,18 @@ void test_input_is_validated_before_writes() {
     require(invalid.status == QueryStatus::InvalidValues && !invalid.committed, "empty name was not rejected");
     invalid = engine.execute(0, "INSERT INTO users (name, age) VALUES ('invalid', 151);");
     require(invalid.status == QueryStatus::InvalidValues && !invalid.committed, "invalid age was not rejected");
+    auto missing = engine.execute(0, "SELECT * FROM users WHERE id = 2;");
+    require(missing.status == QueryStatus::Ok && missing.rows.empty() &&
+            engine.stats().fallbacks == 0 && engine.stats().fallbacks_skipped == 1,
+            "rejected inputs changed the empty inserted range");
     auto result = engine.execute(0, "SELECT * FROM users;");
     require(result.status == QueryStatus::Ok && result.rows.size() == 1,
             "an invalid request partially inserted data");
     result = engine.execute(0, "INSERT INTO users (name, age) VALUES ('valid', 20); -- trailing comment\n");
     require(result.status == QueryStatus::Ok && result.inserted_id == 2, "trailing comment was rejected");
+    result = engine.execute(0, "SELECT * FROM users WHERE id = 2;");
+    require(result.status == QueryStatus::Ok && result.rows.size() == 1 && result.rows[0].name == "valid" &&
+            engine.stats().fallbacks == 1, "first valid insert after rejected inputs was hidden");
     result = engine.execute(1, "SELECT * FROM users;");
     require(result.status == QueryStatus::InternalError, "invalid worker index was accepted");
     require(engine.healthy(), "client errors poisoned the database");
@@ -244,6 +308,29 @@ void test_result_limits_are_not_storage_errors() {
     require(result.status == QueryStatus::ResultTooLarge && result.rows.empty(), "byte cap was ignored");
     require(bytes.stats().fallbacks == 0, "callback failure was incorrectly retried on the writer");
     require(bytes.healthy(), "byte cap poisoned the database");
+}
+
+void test_lock_wait_categories() {
+    TempDirectory directory;
+    directory.seed(1);
+    Engine engine(directory.options(2));
+    for (const auto* sql : {"SELECT * FROM users WHERE id = 1;",
+                            "SELECT * FROM users WHERE id = 100;",
+                            "INSERT INTO users (name, age) VALUES ('new', 2);",
+                            "SELECT * FROM users WHERE id = 2;"}) {
+        require(engine.execute(0, sql).status == QueryStatus::Ok, "metric fixture query failed");
+    }
+    require(engine.execute(1, "invalid").status == QueryStatus::InvalidSql, "invalid SQL was accepted");
+    const auto stats = engine.stats();
+    const std::uint64_t expected[] = {3, 3, 1, 1, 1};
+    std::uint64_t total = 0;
+    for (std::size_t i = 0; i < stats.lock_wait.size(); ++i) {
+        const auto& metric = stats.lock_wait[i];
+        require(metric.count == expected[i], "lock acquisitions assigned to the wrong category");
+        require(metric.max_us <= metric.total_us, "maximum wait exceeds total wait");
+        total += metric.total_us;
+    }
+    require(total == stats.lock_wait_us, "quiescent wait totals disagree");
 }
 
 void test_parallel_readers() {
@@ -299,6 +386,17 @@ void test_parallel_inserts_and_worker_reuse() {
     for (std::size_t i = 0; i < ids.size(); ++i) {
         require(ids[i] == static_cast<std::int64_t>(i + 1), "parallel inserts generated duplicate IDs");
     }
+    for (const auto id : {1, 200}) {
+        auto found = engine.execute(0, "SELECT * FROM users WHERE id = " + std::to_string(id) + ";");
+        require(found.status == QueryStatus::Ok && found.rows.size() == 1 && found.rows[0].id == id,
+                "concurrent inserts lost an endpoint of the successful range");
+    }
+    const auto before_miss = engine.stats();
+    auto missing = engine.execute(1, "SELECT * FROM users WHERE id = 201;");
+    require(missing.status == QueryStatus::Ok && missing.rows.empty() &&
+            engine.stats().fallbacks == before_miss.fallbacks &&
+            engine.stats().fallbacks_skipped == before_miss.fallbacks_skipped + 1,
+            "concurrent inserts left an invalid upper bound");
     auto scan = engine.execute(0, "SELECT * FROM users;");
     require(scan.status == QueryStatus::Ok && scan.rows.size() == ids.size(), "parallel inserts lost rows");
     // Defensive reader ownership also protects an accidentally reused index.
@@ -335,6 +433,13 @@ void test_write_failure_is_global() {
             "writer failure was not propagated to engine health");
     const auto reader = engine.execute(1, "SELECT * FROM users;");
     require(reader.status == QueryStatus::Unavailable, "independent reader ignored the writer failure");
+    for (const auto id : {0, 900}) {
+        const auto missing = engine.execute(1, "SELECT * FROM users WHERE id = " + std::to_string(id) + ";");
+        require(missing.status == QueryStatus::Unavailable,
+                "range-based skip bypassed the global write failure");
+    }
+    require(engine.stats().fallbacks == 0 && engine.stats().fallbacks_skipped == 0,
+            "unavailable requests must not classify index misses");
 #endif
 }
 
@@ -343,9 +448,11 @@ void test_write_failure_is_global() {
 int main() {
     try {
         test_snapshot_fallback_and_eof();
-        test_fallback_skips_ids_present_at_startup();
+        test_fallback_only_within_inserted_range();
+        test_inserted_range_at_int64_limit();
         test_input_is_validated_before_writes();
         test_result_limits_are_not_storage_errors();
+        test_lock_wait_categories();
         test_parallel_readers();
         test_parallel_inserts_and_worker_reuse();
         test_write_failure_is_global();
