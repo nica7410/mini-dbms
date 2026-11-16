@@ -179,7 +179,7 @@ HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한�
 
 - 서로 다른 reader 컨텍스트의 SELECT는 병렬로 실행할 수 있다. 같은 `FILE*`를 여러 thread가 공유하지 않는다.
 - INSERT는 한 writer 컨텍스트에서 직렬화하며, INSERT 실행 중에는 SELECT를 실행하지 않는다.
-- reader의 B+ 트리는 서버 시작 시점의 인덱스다. 시작 이후 삽입한 ID나 존재하지 않는 ID는 writer 인덱스에 재조회하며, 이 재조회는 writer mutex를 공유한다.
+- reader의 B+ 트리는 서버 시작 시점의 인덱스다. ID 조회가 정상적으로 끝났지만 행을 찾지 못한 경우, 시작 이후 성공한 INSERT가 아직 없거나 조회 ID가 첫 성공 INSERT의 ID(`first_insert_id`)보다 작으면 재조회 없이 빈 결과를 반환한다. 그 외의 miss는 writer 인덱스에 재조회하며, 이 재조회는 writer mutex를 공유한다.
 - worker가 `W`개면 writer를 포함하여 `W + 1`개의 테이블 컨텍스트와 인덱스를 구축한다. worker를 늘리면 초기화 시간과 메모리도 늘어난다.
 - 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, UPDATE/DELETE, 페이지네이션은 제공하지 않는다.
 - TSV 쓰기는 기존 엔진의 `fflush` 계약을 사용한다. WAL·`fsync`·crash recovery를 추가한 것은 아니다.

@@ -71,7 +71,11 @@ reader 인덱스는 열 때 구축한 상태를 유지한다. 현재 엔진은 a
 
 reader 인덱스가 ID를 찾지 못하면 같은 SQL을 writer 컨텍스트에서 다시 실행한다. 이때 공유 gate를 유지하여 INSERT가 끼어들지 못하게 하고, writer mutex로 writer의 파일 커서를 보호한다. 실제 읽기 오류는 정상적인 인덱스 miss로 취급하지 않는다.
 
-이 방식으로 새로 INSERT한 ID를 다음 SELECT에서 찾을 수 있지만, 새 ID와 존재하지 않는 ID의 fallback은 writer mutex에서 직렬화된다. reader 인덱스를 실시간으로 복제하거나 새 행마다 전체 인덱스를 재구축하지 않는다.
+이 방식으로 새로 INSERT한 ID를 다음 SELECT에서 찾을 수 있다. reader 인덱스를 실시간으로 복제하거나 새 행마다 전체 인덱스를 재구축하지 않는다.
+
+miss가 났다고 해서 모두 writer로 보내지는 않는다. adapter는 서버 시작 이후 처음 성공한 INSERT의 ID(`first_insert_id`)를 기록한다. writer와 모든 reader는 시작할 때 같은 파일로 인덱스를 만들고, ID는 `last_id + 1`로만 증가한다. 따라서 `first_insert_id`보다 작은 ID는 시작 시점에 이미 있었거나(그러면 모든 reader 인덱스에 있다) 처음부터 없던 ID다. 이런 miss와 INSERT가 아직 없을 때의 miss는 writer를 거치지 않고 빈 결과로 끝낸다. `first_insert_id`는 독점 gate 안에서만 쓰고 공유 gate 안에서 읽으므로 판정 중에 바뀌지 않는다.
+
+fallback은 `first_insert_id` 이상인 ID의 miss에만 남는다. 시작 이후 삽입된 ID와 아직 부여되지 않은 큰 ID가 여기에 해당하며, 이 조회는 writer mutex에서 직렬화된다.
 
 전체 조회·age 조회는 reader의 파일을 새로 탐색한다. 읽는 동안 INSERT가 막히므로 하나의 SELECT 실행 중 파일이 추가되지 않는다. 이 성질은 모든 접근이 이 서버를 통한다는 조건에서 성립한다.
 
@@ -141,6 +145,7 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 | `engine.requests` | adapter의 `execute` 호출 수. 만료된 요청은 포함하지 않음 |
 | `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과 |
 | `engine.fallbacks` | reader ID miss 뒤 writer 인덱스를 조회한 수 |
+| `engine.fallbacks_skipped` | reader ID miss 중 서버 시작 이후 성공한 INSERT가 아직 없거나, 조회 ID가 첫 성공 INSERT의 ID(`first_insert_id`)보다 작아서 writer 재조회 없이 빈 결과로 끝난 수 |
 | `engine.current_executions`, `peak_executions` | 기존 `executor_run` 호출 범위의 현재·최대 중첩 수 |
 | `engine.lock_wait_us` | reader mutex, gate, writer mutex의 누적 대기 |
 | `engine.execution_us` | 기존 executor 호출에 쓴 누적 시간. fallback도 별도 호출로 포함 |
@@ -152,7 +157,7 @@ engine 카운터는 각각 atomic으로 읽으므로 실행 중인 snapshot에�
 현재 선택은 Phase 1·2를 변경하지 않고 독립 SELECT를 병렬로 실행하기 위한 방법이다. 다음 비용을 감수한다.
 
 - `W`개 worker를 위해 `W + 1`회 테이블을 열고 각각 B+ 트리를 구축한다. 데이터가 크면 초기화 시간과 인덱스 메모리도 그 수에 영향을 받는다.
-- 시작 이후의 ID는 reader 인덱스에 없으므로 ID 조회가 writer fallback으로 모일 수 있다.
+- 시작 이후의 ID는 reader 인덱스에 없으므로 그 ID와 아직 부여되지 않은 큰 ID의 조회는 writer fallback으로 모일 수 있다. 시작 시점보다 오래된 범위의 없는 ID는 fallback 없이 처리한다.
 - 긴 순차 탐색은 writer를 기다리게 한다. writer가 대기하면 이후 reader도 gate에서 기다린다.
 - 파일 읽기, 결과 복사, JSON 직렬화와 HTTP 전송 비용은 인덱스 검색 시간과 별개다.
 - 결과·대기열 제한은 과도한 단일 요청과 대기열 증가를 제어하지만 프로세스 전체 메모리 사용량을 정확한 상한으로 제한하지 않는다.

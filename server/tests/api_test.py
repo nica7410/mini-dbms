@@ -116,6 +116,10 @@ class ApiTest(unittest.TestCase):
                 self.assertEqual(server.query("SELECT * FROM users WHERE id = 999;")[1]["rows"], [])
             with Server(directory) as restarted:
                 self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 1;")[1]["row_count"], 1)
+                # No INSERT since startup: the reader index alone settles a miss.
+                self.assertEqual(restarted.query("SELECT * FROM users WHERE id = 999;")[1]["rows"], [])
+                engine = restarted.metrics()["engine"]
+                self.assertEqual((engine["fallbacks"], engine["fallbacks_skipped"]), (0, 1))
                 status, inserted = restarted.query("INSERT INTO users (name, age) VALUES ('next', 26);")
                 self.assertEqual((status, inserted["inserted_id"]), (200, "2"))
 

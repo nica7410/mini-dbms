@@ -97,6 +97,7 @@ struct Metrics {
     std::atomic<std::uint64_t> successful_selects{0};
     std::atomic<std::uint64_t> errors{0};
     std::atomic<std::uint64_t> fallbacks{0};
+    std::atomic<std::uint64_t> fallbacks_skipped{0};
     std::atomic<std::uint64_t> current_executions{0};
     std::atomic<std::uint64_t> peak_executions{0};
     std::atomic<std::uint64_t> lock_wait_us{0};
@@ -217,6 +218,16 @@ struct Engine::Impl {
         metrics.lock_wait_us.fetch_add(microseconds_since(started), std::memory_order_relaxed);
     }
 
+    // Every reader index and the writer index are built from the same file at
+    // construction, and IDs only grow (last_id + 1). Hence any ID below the
+    // first ID inserted since then was either present at startup, and so in
+    // every reader index, or never existed. Only IDs at or above it can be
+    // missing from a reader snapshot. Call while holding the shared gate.
+    bool may_be_inserted_since_startup(std::int64_t id) const noexcept {
+        const auto first = first_insert_id.load(std::memory_order_acquire);
+        return first != 0 && id >= first;
+    }
+
     bool available(QueryResult& result) const {
         if (is_healthy.load(std::memory_order_acquire)) return true;
         fail(result, QueryStatus::Unavailable, "database requires validation and restart after a storage failure");
@@ -292,6 +303,11 @@ struct Engine::Impl {
             const ResultSink sink{record_insert, nullptr, &result};
             const int rc = run_c(writer.get(), statement, sink, error);
             if (rc == 0) {
+                // The exclusive gate serializes INSERTs, so check-then-store is
+                // race-free. Readers observe it under the shared gate.
+                if (first_insert_id.load(std::memory_order_relaxed) == 0) {
+                    first_insert_id.store(result.inserted_id, std::memory_order_release);
+                }
                 result.status = QueryStatus::Ok;
                 return;
             }
@@ -324,15 +340,22 @@ struct Engine::Impl {
         const ResultSink sink{nullptr, collect_row, &collector};
         int rc = run_c(reader.table.get(), statement, sink, error);
         if (rc == 0 && statement.where == WHERE_ID && collector.calls == 0) {
-            // Reader indexes are immutable snapshots. An append cannot invalidate
-            // their hits; a miss must consult the authoritative writer index.
-            // Always take locks in gate -> writer_mutex order.
-            wait_started = Clock::now();
-            std::unique_lock<std::mutex> writer_lock(writer_mutex);
-            add_wait(wait_started);
-            if (!available(result)) return;
-            metrics.fallbacks.fetch_add(1, std::memory_order_relaxed);
-            rc = run_c(writer.get(), statement, sink, error);
+            if (!may_be_inserted_since_startup(statement.where_value)) {
+                // The miss is final: this ID cannot have been added after the
+                // reader index was built, so the writer index would miss too.
+                metrics.fallbacks_skipped.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                // Reader indexes are immutable snapshots. An append cannot
+                // invalidate their hits; a miss on a possibly new ID must consult
+                // the authoritative writer index.
+                // Always take locks in gate -> writer_mutex order.
+                wait_started = Clock::now();
+                std::unique_lock<std::mutex> writer_lock(writer_mutex);
+                add_wait(wait_started);
+                if (!available(result)) return;
+                metrics.fallbacks.fetch_add(1, std::memory_order_relaxed);
+                rc = run_c(writer.get(), statement, sink, error);
+            }
         }
         finish_select(rc, collector, error);
     }
@@ -362,6 +385,8 @@ struct Engine::Impl {
     WriterPreferredGate gate;
     std::mutex writer_mutex;
     std::atomic<bool> is_healthy{true};
+    // ID of the first successful INSERT since construction; 0 until then.
+    std::atomic<std::int64_t> first_insert_id{0};
     Metrics metrics;
 };
 
@@ -384,6 +409,7 @@ EngineStats Engine::stats() const {
     out.successful_selects = metrics.successful_selects.load(std::memory_order_relaxed);
     out.errors = metrics.errors.load(std::memory_order_relaxed);
     out.fallbacks = metrics.fallbacks.load(std::memory_order_relaxed);
+    out.fallbacks_skipped = metrics.fallbacks_skipped.load(std::memory_order_relaxed);
     out.current_executions = metrics.current_executions.load(std::memory_order_relaxed);
     out.peak_executions = metrics.peak_executions.load(std::memory_order_relaxed);
     out.lock_wait_us = metrics.lock_wait_us.load(std::memory_order_relaxed);

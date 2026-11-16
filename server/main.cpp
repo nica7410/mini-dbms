@@ -399,6 +399,7 @@ int serve(const Options &options) {
         db["successful_selects"] = Json::UInt64(database.successful_selects);
         db["errors"] = Json::UInt64(database.errors);
         db["fallbacks"] = Json::UInt64(database.fallbacks);
+        db["fallbacks_skipped"] = Json::UInt64(database.fallbacks_skipped);
         db["current_executions"] = Json::UInt64(database.current_executions);
         db["peak_executions"] = Json::UInt64(database.peak_executions);
         db["lock_wait_us"] = Json::UInt64(database.lock_wait_us);

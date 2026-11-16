@@ -50,6 +50,9 @@ struct EngineStats {
     std::uint64_t successful_selects = 0;
     std::uint64_t errors = 0;
     std::uint64_t fallbacks = 0;
+    // Reader ID misses answered without the writer: the ID predates every insert
+    // since startup, so the reader's startup index is already authoritative.
+    std::uint64_t fallbacks_skipped = 0;
     // These count executor_run calls, excluding parsing and lock waiting.
     std::uint64_t current_executions = 0;
     std::uint64_t peak_executions = 0;

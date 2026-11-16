@@ -135,6 +135,61 @@ void test_snapshot_fallback_and_eof() {
     require(reopened.stats().fallbacks == 0, "reopened reader index was not rebuilt");
 }
 
+void test_fallback_skips_ids_present_at_startup() {
+    TempDirectory directory;
+    {
+        // IDs only need to increase, so a gap (3, 4) is a valid stored state.
+        std::ofstream file(directory.path / "users.tsv", std::ios::binary);
+        file << "1\ta\t1\n2\tb\t2\n5\tc\t5\n";
+        file.close();
+        require(static_cast<bool>(file), "unable to write the gap fixture");
+    }
+    Engine engine(directory.options(2));
+    const auto lookup = [&](std::size_t worker, std::int64_t id) {
+        return engine.execute(worker, "SELECT * FROM users WHERE id = " + std::to_string(id) + ";");
+    };
+    const auto expect_empty = [&](std::size_t worker, std::int64_t id, const char* message) {
+        const auto result = lookup(worker, id);
+        require(result.status == QueryStatus::Ok && result.rows.empty(), message);
+    };
+
+    // Before any INSERT the startup indexes are complete: no miss needs the writer.
+    expect_empty(0, 3, "gap ID was found before any insert");
+    expect_empty(1, 900, "future ID was found before any insert");
+    expect_empty(0, 0, "ID 0 was found");
+    require(engine.stats().fallbacks == 0 && engine.stats().fallbacks_skipped == 3,
+            "misses before the first insert must not consult the writer");
+
+    auto inserted = engine.execute(1, "INSERT INTO users (name, age) VALUES ('new', 6);");
+    require(inserted.status == QueryStatus::Ok && inserted.inserted_id == 6, "insert after a gap failed");
+    auto second = engine.execute(0, "INSERT INTO users (name, age) VALUES ('newer', 7);");
+    require(second.status == QueryStatus::Ok && second.inserted_id == 7, "second insert failed");
+
+    // Below the first post-startup ID a reader miss is still final.
+    expect_empty(0, 4, "gap ID below the first insert was found");
+    expect_empty(1, -1, "negative ID was found");
+    require(engine.stats().fallbacks == 0 && engine.stats().fallbacks_skipped == 5,
+            "pre-startup misses after inserts must not consult the writer");
+
+    // Reader hits never fall back, whichever side of the boundary they are on.
+    auto old = lookup(1, 5);
+    require(old.status == QueryStatus::Ok && old.rows.size() == 1 && old.rows[0].name == "c",
+            "startup row was not served by its reader");
+
+    // IDs at or above the boundary may be newer than the snapshot.
+    auto fresh = lookup(0, 6);
+    require(fresh.status == QueryStatus::Ok && fresh.rows.size() == 1 && fresh.rows[0].name == "new",
+            "first inserted ID was not served through the writer");
+    fresh = lookup(1, 7);
+    require(fresh.status == QueryStatus::Ok && fresh.rows.size() == 1 && fresh.rows[0].name == "newer",
+            "later inserted ID was not served through the writer");
+    expect_empty(0, 8, "unassigned ID was found");
+    const auto stats = engine.stats();
+    require(stats.fallbacks == 3 && stats.fallbacks_skipped == 5,
+            "only IDs at or above the first insert may consult the writer");
+    require(engine.healthy(), "skipped fallbacks damaged health state");
+}
+
 void test_input_is_validated_before_writes() {
     TempDirectory directory;
     directory.seed(1);
@@ -288,6 +343,7 @@ void test_write_failure_is_global() {
 int main() {
     try {
         test_snapshot_fallback_and_eof();
+        test_fallback_skips_ids_present_at_startup();
         test_input_is_validated_before_writes();
         test_result_limits_are_not_storage_errors();
         test_parallel_readers();
