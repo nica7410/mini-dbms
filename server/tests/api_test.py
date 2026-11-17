@@ -175,6 +175,26 @@ class ApiTest(unittest.TestCase):
                     self.assertLessEqual(waits[name]["max_us"], waits[name]["total_us"])
                 self.assertEqual(sum(v["total_us"] for v in waits.values()), engine["lock_wait_us"])
 
+    def test_request_kind_queue_metrics(self):
+        with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory:
+            fixture(directory, 1)
+            with Server(directory) as server:
+                for sql in ("SELECT * FROM users WHERE id = 1;",
+                            "INSERT INTO users (name, age) VALUES ('new', 2);",
+                            "INSERT INTO users (name, age) VALUES ('a', 1), ('b', 2);",
+                            "SELECT * FROM users;",
+                            "SELEC broken;"):
+                    server.query(sql)
+                metrics = server.metrics()
+                kinds = metrics["request_kinds"]
+                self.assertEqual({name: kinds[name]["count"] for name in kinds},
+                                 {"insert": 2, "select": 2, "other": 1})
+                for detail in kinds.values():
+                    self.assertEqual(set(detail), {"count", "queue_wait_us", "max_queue_wait_us", "total_us"})
+                    self.assertLessEqual(detail["max_queue_wait_us"], detail["queue_wait_us"])
+                    self.assertLessEqual(detail["queue_wait_us"], detail["total_us"])
+                self.assertEqual(sum(d["count"] for d in kinds.values()), metrics["pool"]["completed"])
+
     def test_invalid_input_has_no_insert_side_effect(self):
         with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory, Server(directory) as server:
             insert = "INSERT INTO users (name, age) VALUES ('must-not-exist', 25);"

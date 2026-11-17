@@ -39,6 +39,55 @@ static_assert(std::atomic<bool>::is_always_lock_free,
 // Signal handlers only set a flag. The event loop performs shutdown work.
 extern "C" void request_stop(int) { stop_requested.store(true, std::memory_order_relaxed); }
 
+std::uint64_t microseconds_between(Clock::time_point from, Clock::time_point to) noexcept {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(to - from).count();
+    return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+}
+
+// Accepted /query tasks by what the worker found them to be. The queue itself
+// does not know the kind; it is decided after the worker parses the SQL.
+enum class RequestKind : std::size_t { Insert, Select, Other, Count };
+
+class RequestKindMetrics {
+public:
+    struct Snapshot {
+        std::uint64_t count = 0;
+        std::uint64_t queue_wait_us = 0;
+        std::uint64_t max_queue_wait_us = 0;
+        // Enqueue until the response is handed back to the HTTP loop.
+        std::uint64_t total_us = 0;
+    };
+
+    void record(RequestKind kind, std::uint64_t queue_wait_us, std::uint64_t total_us) noexcept {
+        auto &slot = slots_[static_cast<std::size_t>(kind)];
+        slot.count.fetch_add(1, std::memory_order_relaxed);
+        slot.queue_wait_us.fetch_add(queue_wait_us, std::memory_order_relaxed);
+        slot.total_us.fetch_add(total_us, std::memory_order_relaxed);
+        auto maximum = slot.max_queue_wait_us.load(std::memory_order_relaxed);
+        while (maximum < queue_wait_us && !slot.max_queue_wait_us.compare_exchange_weak(
+                   maximum, queue_wait_us, std::memory_order_relaxed)) {}
+    }
+
+    Snapshot snapshot(RequestKind kind) const noexcept {
+        const auto &slot = slots_[static_cast<std::size_t>(kind)];
+        Snapshot out;
+        out.count = slot.count.load(std::memory_order_relaxed);
+        out.queue_wait_us = slot.queue_wait_us.load(std::memory_order_relaxed);
+        out.max_queue_wait_us = slot.max_queue_wait_us.load(std::memory_order_relaxed);
+        out.total_us = slot.total_us.load(std::memory_order_relaxed);
+        return out;
+    }
+
+private:
+    struct Slot {
+        std::atomic<std::uint64_t> count{0};
+        std::atomic<std::uint64_t> queue_wait_us{0};
+        std::atomic<std::uint64_t> max_queue_wait_us{0};
+        std::atomic<std::uint64_t> total_us{0};
+    };
+    Slot slots_[static_cast<std::size_t>(RequestKind::Count)];
+};
+
 struct Options {
     std::string data_dir = "data";
     std::string host = "127.0.0.1";
@@ -312,6 +361,7 @@ int serve(const Options &options) {
     std::atomic<bool> stopping{false};
     std::atomic<std::uint64_t> next_request{1};
     std::atomic<std::uint64_t> expired{0};
+    RequestKindMetrics kinds;
     auto &app = drogon::app();
     // Account for worst-case JSON escaping of an otherwise valid SQL string.
     const std::size_t body_limit = options.max_sql_bytes * 6 + 1024;
@@ -366,12 +416,17 @@ int serve(const Options &options) {
                     std::int64_t first_id = 0, last_id = 0;
                     std::size_t inserted = 0;
                     drogon::HttpResponsePtr response;
+                    // Expired tasks and unparsable SQL never reveal their kind.
+                    auto kind = RequestKind::Other;
+                    const auto started_at = Clock::now();
                     try {
-                        if (Clock::now() - queued_at > std::chrono::milliseconds(options.queue_timeout_ms)) {
+                        if (started_at - queued_at > std::chrono::milliseconds(options.queue_timeout_ms)) {
                             expired.fetch_add(1, std::memory_order_relaxed);
                             response = error_response(503, id, "QUEUE_TIMEOUT", "Task expired before SQL execution", "not_started");
                         } else {
                             auto result = engine.execute(worker, sql);
+                            if (result.is_insert) kind = RequestKind::Insert;
+                            else if (result.status != minidb::QueryStatus::InvalidSql) kind = RequestKind::Select;
                             if (result.committed) {
                                 outcome_on_throw =
                                     result.status == minidb::QueryStatus::Ok ? "applied" : "partial";
@@ -387,6 +442,8 @@ int serve(const Options &options) {
                         response = error_response(500, id, "INTERNAL_ERROR", "Request processing failed",
                                                   outcome_on_throw, stored);
                     }
+                    kinds.record(kind, microseconds_between(queued_at, started_at),
+                                 microseconds_between(queued_at, Clock::now()));
                     // Drogon hands the response back to the connection's I/O loop.
                     // Transmission failure never rolls back an already applied INSERT.
                     done(response);
@@ -426,6 +483,17 @@ int serve(const Options &options) {
         queue["queue_wait_us"] = Json::UInt64(workers.queue_wait_us);
         queue["max_queue_wait_us"] = Json::UInt64(workers.max_queue_wait_us);
         queue["expired"] = Json::UInt64(expired.load(std::memory_order_relaxed));
+        const char *kind_names[] = {"insert", "select", "other"};
+        static_assert(sizeof kind_names / sizeof kind_names[0] == static_cast<std::size_t>(RequestKind::Count),
+                      "every RequestKind needs a /metrics name");
+        for (std::size_t i = 0; i < static_cast<std::size_t>(RequestKind::Count); ++i) {
+            const auto metric = kinds.snapshot(static_cast<RequestKind>(i));
+            auto &detail = result["request_kinds"][kind_names[i]];
+            detail["count"] = Json::UInt64(metric.count);
+            detail["queue_wait_us"] = Json::UInt64(metric.queue_wait_us);
+            detail["max_queue_wait_us"] = Json::UInt64(metric.max_queue_wait_us);
+            detail["total_us"] = Json::UInt64(metric.total_us);
+        }
         auto &db = result["engine"];
         db["healthy"] = engine.healthy();
         db["requests"] = Json::UInt64(database.requests);

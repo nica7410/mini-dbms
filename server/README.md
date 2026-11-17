@@ -202,6 +202,8 @@ Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다
 
 `/metrics`의 `engine.lock_wait`는 `reader_mutex`, `read_gate`, `write_gate`별 `count`, `total_us`, `max_us`를 제공한다. count는 경합 여부와 무관한 성공 획득 횟수이며 시간은 잠금 보유 시간을 제외한다. 기존 `engine.lock_wait_us`는 전체 합계로 유지한다. 요청 p95/p99는 이 합계에서 계산할 수 없으며, [부하 생성기](benchmarks/README.md)로 클라이언트 지연을 측정한다.
 
+`/metrics`의 `request_kinds`는 worker가 처리한 요청을 `insert`, `select`, `other`로 나눠 `count`, `queue_wait_us`(큐 대기 합계), `max_queue_wait_us`, `total_us`(큐 진입부터 응답을 HTTP 루프에 넘길 때까지의 합계)를 제공한다. 종류는 worker가 SQL을 파싱한 뒤에 정해진다. 큐에서 만료된 요청, 파싱 실패, 처리 중 예외는 `other`다. 큐에 들어가지 못한 요청(`QUEUE_FULL` 등)은 세지 않는다.
+
 ## 종료
 
 `Ctrl+C` 또는 `SIGTERM`을 받으면 신규 SQL을 거절하고 수락한 작업을 처리한 뒤 worker를 join한다. 큐에서 만료된 작업은 SQL을 실행하지 않고 만료 응답으로 끝낸다. 이미 시작한 SQL을 강제로 취소하지 않는다.
