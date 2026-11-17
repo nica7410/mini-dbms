@@ -45,7 +45,8 @@ int table_close(Table *t, DbError *err);
  * TableReader: 같은 Table의 ID 인덱스를 공유하면서 파일 위치만 따로 갖는 읽기 핸들.
  * 여러 스레드가 각자 reader로 동시에 읽을 수 있게 하려는 것이다.
  * - reader는 Table보다 먼저 닫아야 한다.
- * - 한 reader를 여러 스레드가 동시에 쓰면 안 된다.
+ * - 한 reader를 여러 스레드가 동시에 쓰면 안 된다. Table도 마찬가지다.
+ *   (파일은 FILE 잠금 없이 읽으므로 같은 핸들의 동시 사용은 정의되지 않은 동작이다.)
  * - 인덱스를 공유하므로 reader 조회와 table_append가 동시에 실행되면 안 된다.
  *   (읽기끼리는 동시에 실행해도 된다. 동기화는 호출자가 맡는다.)
  * 조회 규칙과 반환값은 table_scan / table_find_id와 같다.

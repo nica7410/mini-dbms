@@ -8,6 +8,8 @@ C 엔진에는 서버의 병렬 조회를 위해 읽기 함수만 추가했다([
 - `storage.h`: `TableReader`, `table_reader_open`, `table_reader_scan`, `table_reader_find_id`, `table_reader_close`
 - `executor.h`: `executor_run_read`
 
+또 줄 단위 읽기에서 `getc` 대신 FILE 잠금을 걸지 않는 `getc_unlocked`(Windows는 `_getc_nolock`)를 쓴다. 멀티스레드 서버에서 `getc`는 문자마다 잠금을 걸어 스캔이 약 5배 느렸다([B6](phase3-benchmarks/20261116/minimal-report.md#b6-스캔-읽기-루프의-file-잠금-제거--2026-11-17)). 같은 FILE을 두 스레드가 동시에 쓰지 않는다는 전제는 worker별 `TableReader`와 배타 gate로 지켜진다.
+
 기존 공개 함수와 CLI의 동작은 바꾸지 않았다. 기존 `table_scan`과 `table_find_id`는 새 함수와 같은 내부 코드를 쓰는 wrapper가 됐다. 기존 C 검사·CLI 테스트·ASan/UBSan이 그대로 통과한다.
 
 `server/c_api.hpp`가 기존 헤더를 `extern "C"`로 감싼다. 이는 C++ 호출자의 링크 이름을 C 함수 이름과 맞추는 역할이며, C 코드에 동기화를 추가하거나 C++ 코드로 다시 컴파일하는 기능은 아니다. 동기화는 C++ adapter가 맡는다.
@@ -246,6 +248,7 @@ LeakSanitizer는 실행 환경의 ptrace 제약 때문에 실행할 수 없어 �
   - 후보는 읽기 p99를 4.4ms로 줄였지만 처리량이 34% 줄고 쓰기 p99가 30% 늘었다.
   - 채택하지 않고 현재 쓰기 우선 정책을 유지한다.
 - **깨우기 개선(2026-11-17):** 쓰기 우선 정책은 그대로 두고, gate가 대기 writer 하나만 깨우도록 바꿨다. 같은 쓰기 99% 부하에서 처리량이 약 1.3만→3.3만 RPS, 읽기 p99가 약 130→20ms, 쓰기 p99가 3.3→1.7ms가 됐다. 스캔 부하는 변화가 없었다.
+- **스캔 잠금 제거(2026-11-17):** `getc_unlocked`로 바꾼 뒤 스캔 혼합 처리량이 worker 1에서 3.9→20.5 RPS, worker 8에서 19.6→약 100 RPS가 됐다. 스캔 중 INSERT p99는 worker 8에서 1.8→0.4초로 줄었다.
 - **비용 수치 갱신:** 위 RSS·시작 시간 증가는 인덱스 복제 구조의 측정값이다. 단일 인덱스 전환 뒤에는 worker 수와 무관하게 약 41MB, 0.1초다(B4).
 
 결과는 [최소 검증 결과](phase3-benchmarks/20261116/minimal-report.md)에 있다.
