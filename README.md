@@ -1,6 +1,6 @@
-# 미니 DBMS — Phase 2
+# 미니 DBMS — Phase 1~3
 
-C17로 구현한 SQL CLI다. 레코드는 TSV 파일에 저장하고, ID 조회는 메모리 B+ 트리로 처리한다.
+C17로 구현한 SQL 엔진과 CLI(Phase 1·2), 그리고 그 엔진을 여러 스레드에서 쓰는 C++17 HTTP API 서버(Phase 3)다. 레코드는 TSV 파일에 저장하고, ID 조회는 메모리 B+ 트리로 처리한다. Phase 3 요약은 [아래 절](#phase-3--c-api-서버)에 있다.
 
 ## Phase 1 문서
 
@@ -56,6 +56,8 @@ Windows에서 `mingw32-make bench`, Linux에서 `make bench`를 실행한다. �
 
 Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측정했다. 조회 시간은 각 쿼리를 한 번 예열한 후 같은 테이블에서 반복한 평균이다. 쿼리 파싱, CLI 출력, 테이블 재열기 시간은 조회 측정에서 제외했다. CLI를 매번 새로 실행하면 인덱스 재구축 시간도 포함된다.
 
+이 수치는 Phase 3에서 줄 읽기를 `getc`에서 잠금 없는 `getc_unlocked`/`_getc_nolock`으로 바꾸기 전의 측정이다. 바꾼 뒤 Windows에서는 다시 재지 않았다. Linux 컨테이너에서는 단일 스레드 CLI의 순차 탐색이 약 65ms에서 약 47ms로 줄었다.
+
 ## 코드 구성
 
 | 파일 | 역할 |
@@ -63,7 +65,7 @@ Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측�
 | src/main.c | CLI: 인자·SQL 파일 읽기, 문장 순차 실행, 결과·오류 출력, 종료 코드 |
 | src/parser.c | Lexer + 재귀 하강 파서: SQL 텍스트 → Statement |
 | src/executor.c | 값 검증, ID 인덱스 조회와 순차 탐색 선택, 결과 콜백 전달 |
-| src/storage.c | TSV 검증·읽기·추가, 다음 ID와 인덱스 관리 |
+| src/storage.c | TSV 검증·읽기·추가, 다음 ID와 인덱스 관리. Phase 3에서 인덱스를 공유하는 읽기 핸들(`TableReader`) 추가 |
 | src/bptree.c | 리프·내부 노드 분할과 ID 조회 |
 | tests/test_unit.c | Parser·Storage·Executor 단위 테스트, 노드 분할과 재구축 검증 |
 | tests/cli_test.py | 실제 프로세스를 실행하는 CLI 통합 테스트 |
@@ -71,10 +73,45 @@ Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측�
 
 ## Phase 3 — C++ API 서버
 
-기존 C17 엔진과 CLI를 유지하고 C++17·Drogon API 서버와 고정 크기 Thread Pool을 추가했다. 독립 reader 컨텍스트에서 SELECT를 병렬 실행하고, INSERT는 단일 writer와 읽기·쓰기 gate로 보호한다.
+기존 C17 엔진과 CLI를 유지하고 C++17·Drogon API 서버와 고정 크기 Thread Pool을 추가했다. HTTP 요청은 Drogon I/O 스레드가 받고, SQL은 크기가 제한된 큐를 거쳐 고정 수의 SQL worker가 실행한다.
+
+### 동시성 구조
+
+```
+SELECT: worker i → reader mutex → 공유 gate → TableReader[i](자기 FILE*) + 공유 B+ 트리
+INSERT:                         배타 gate → Table(쓰기 FILE*, 공유 B+ 트리 갱신)
+```
+
+- **B+ 트리는 하나를 모든 worker가 공유한다.** 공유 gate 아래에서만 읽고, INSERT의 배타 gate 아래에서만 바뀐다. 그래서 INSERT 직후 어느 worker에서 조회해도 새 행이 바로 보인다.
+- **파일 핸들은 worker마다 따로 연다.** 같은 `FILE*`를 두 스레드가 동시에 쓰지 않으므로 SELECT끼리는 병렬로 실행된다.
+- **gate는 쓰기 우선이다.** 대기 중인 writer가 있으면 새 reader는 기다린다. 풀릴 때는 대기 writer 하나만 깨운다.
+- C 엔진에는 이 구조에 필요한 읽기 함수(`TableReader`, `executor_run_read`)만 추가했다. 기존 공개 함수, CLI 동작과 테스트는 그대로다.
+
+### 측정 결과
+
+100만 행, Linux 컨테이너(CPU 8개)에서 측정했다. 부하 생성기는 서버와 같은 컨테이너에서 연결 32개로 돌렸고, 각 조건을 3회 반복했다.
+
+| 부하 | worker 1 | worker 8 |
+|---|---:|---:|
+| 스캔 90% + INSERT 10% 처리량 | 20.5 RPS | 약 100 RPS |
+| 위 부하에서 INSERT p99 | 1.7 s | 0.35–0.40 s |
+| INSERT 99% + ID 조회 1% 처리량 | — | 약 3.3만 RPS (부하 생성기 한계) |
+| 위 부하에서 읽기 p99 / 쓰기 p99 | — | 약 20 ms / 약 1.7 ms |
+| 서버 메모리(RSS) | 41 MB | 41 MB |
+| 시작 시간(인덱스 구축 포함) | 약 0.1 s | 약 0.1 s |
+
+- 직렬 비교 서버(DB 실행을 한 번에 하나만)는 worker 수와 관계없이 스캔 부하 처리량이 늘지 않았다.
+- 알려진 한계:
+  - 긴 스캔이 실행되는 동안 INSERT는 기다린다.
+  - 쓰기 우선 gate라서 쓰기가 몰리면 읽기가 밀린다(쓰기 99%에서 읽기 p99가 쓰기 p99의 약 11배).
+  - INSERT는 `fflush`까지만 하며 `fsync`는 하지 않는다.
+- 측정 과정과 채택·기각한 개선(공정 gate, 단일 인덱스 전환, 깨우기 방식, 읽기 잠금 제거)은 [측정 보고서](docs/phase3-benchmarks/20261116/minimal-report.md)에 있다.
+
+### 문서
 
 - [빌드·실행·HTTP API·제약](server/README.md)
 - [구현 설명과 동시성 설계](docs/implementation-phase3.md)
+- [측정 보고서](docs/phase3-benchmarks/20261116/minimal-report.md), [개선 작업 계획과 기록](docs/plans/phase3-improvements/README.md)
 
 Linux/WSL에서 필요한 개발 패키지를 설치한 뒤 저장소 루트에서 실행한다. 의존성 설치와 Docker 실행은 서버 README에 있다.
 
