@@ -87,7 +87,7 @@ reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같�
 
 ### 새 행이 보이는 이유
 
-- **ID 조회:** INSERT는 배타 gate 안에서 파일에 쓰고 `fflush`한 뒤 공유 인덱스에 키를 추가한다. 이후 SELECT는 공유 gate 아래에서 같은 인덱스로 위치를 찾고, 자기 `FILE*`를 그 위치로 `fseek`해 읽는다.
+- **ID 조회:** INSERT는 배타 gate 안에서 공유 인덱스에 키를 추가하고, 문장의 모든 행을 한 번에 파일에 쓴 뒤 `fflush`한다. 키를 쓰기보다 먼저 넣지만 gate가 끝날 때까지 reader가 보지 않고, 쓰기에 실패하면 `write_failed`로 모든 조회가 거절되므로 파일에 없는 행을 가리키는 키를 읽지 않는다. 이후 SELECT는 공유 gate 아래에서 같은 인덱스로 위치를 찾고, 자기 `FILE*`를 그 위치로 `fseek`해 읽는다.
 - **스캔:** 전체 조회와 age 조회는 매번 `fseek(0)`부터 읽는다. `fseek`는 stdio 버퍼와 EOF 상태를 비우므로, 이전에 파일 끝까지 읽었던 핸들도 새로 추가된 행을 읽는다.
 - **추가가 끼어들지 않음:** 읽는 동안 INSERT가 막히므로 하나의 SELECT 실행 중 파일과 인덱스가 바뀌지 않는다. 이 성질은 모든 접근이 이 서버를 통한다는 조건에서 성립한다.
 - **저장 실패:** 쓰기에 실패하면 공유 `Table`에 `write_failed`가 기록된다. 이후 모든 `TableReader` 조회도 같은 상태를 확인해 거절한다.
@@ -110,7 +110,7 @@ worker에서는 기존 `parser_next`로 첫 문장을 읽고, 다시 호출하�
 
 독점 gate를 획득한 뒤 기존 `executor_run`을 호출한다. 기존 Storage가 파일과 인덱스 작업을 마치고 성공 callback을 호출하면, adapter는 ID와 `committed` 상태만 기록한다. 이 callback은 메모리를 할당하지 않고 C++ 예외를 밖으로 던지지 않는다.
 
-여러 행 INSERT(`VALUES (...), (...)`, 최대 1,000행)도 문장 하나이므로 gate를 한 번만 잡는다. callback은 행마다 한 번 불리며, adapter는 첫 ID·마지막 ID·개수만 갱신한다. gate가 문장 전체를 덮으므로 한 문장의 ID는 항상 연속이고, 다른 요청의 행과 섞이지 않는다. 응답은 `inserted_id`(첫 ID), `last_inserted_id`, `affected_rows`(행 수)다. 값 오류는 C executor가 모든 행을 검증한 뒤 기록하므로 한 행도 쓰지 않는다. 쓰는 도중 저장 실패로 일부 행만 기록되면 `STORAGE_ERROR`와 함께 `write_outcome: partial` 및 기록된 ID 범위를 돌려준다. 1,000행 상한은 gate 점유 시간(INSERT 한 건 약 13µs 기준 약 13ms, 추정)과 기본 SQL 크기 제한 64 KiB에 맞춘 값이다.
+여러 행 INSERT(`VALUES (...), (...)`, 최대 1,000행)도 문장 하나이므로 gate를 한 번만 잡는다. callback은 행마다 한 번 불리며, adapter는 첫 ID·마지막 ID·개수만 갱신한다. gate가 문장 전체를 덮으므로 한 문장의 ID는 항상 연속이고, 다른 요청의 행과 섞이지 않는다. 응답은 `inserted_id`(첫 ID), `last_inserted_id`, `affected_rows`(행 수)다. 값 오류는 C executor가 모든 행을 검증한 뒤 기록하므로 한 행도 쓰지 않는다. 쓰는 도중 저장 실패로 일부 행만 기록되면 `STORAGE_ERROR`와 함께 `write_outcome: partial` 및 기록된 ID 범위를 돌려준다. 1,000행 상한은 gate 점유 시간(INSERT 한 건 약 13µs 기준 약 13ms, 추정)과 기본 SQL 크기 제한 64 KiB에 맞춘 값이다. 한 문장의 행은 한 번에 쓰고 한 번 flush한다([08 group commit](plans/phase3-improvements/08-group-commit.md)). C 벤치마크에서 1,000행 문장 1,000개(100만 행)는 약 3.3초에서 약 0.2초로 줄었다(3회 중앙값). gate 점유 시간도 같은 비율로 줄 것으로 보지만 서버에서 직접 측정하지는 않았다.
 
 여기서 `committed`/`write_outcome: applied`는 기존 C API가 INSERT 성공을 알렸다는 뜻이다. 트랜잭션 commit, WAL 기록, `fsync`에 의한 전원 장애 내구성을 추가한 뜻은 아니다. 기존 엔진의 flush·오류 처리 계약을 유지한다.
 

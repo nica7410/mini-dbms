@@ -1026,7 +1026,161 @@ static void test_executor_multi_row_partial_write(void) {
     CHECK(strcmp(buf, "1\ta\t1\n2\tb\t2\n") == 0);
     (void)table_close(t, &err);
 }
+
+/* 파일 크기 제한을 limit_bytes로 두고 rows를 묶음으로 쓴다. SIGXFSZ는 무시한다. */
+static int append_rows_limited(Table *t, const AppendRow *rows, size_t n, size_t limit_bytes,
+                               int64_t *first_id, size_t *stored, DbError *err) {
+    struct rlimit previous;
+    struct rlimit limited;
+    void (*old_handler)(int);
+    int rc;
+
+    if (getrlimit(RLIMIT_FSIZE, &previous) != 0) {
+        return -2;
+    }
+    old_handler = signal(SIGXFSZ, SIG_IGN);
+    limited = previous;
+    limited.rlim_cur = limit_bytes;
+    if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        signal(SIGXFSZ, old_handler);
+        return -2;
+    }
+    rc = table_append_rows(t, rows, n, first_id, stored, err);
+    CHECK(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+    signal(SIGXFSZ, old_handler);
+    return rc;
+}
+
+static void test_append_rows_torn_write(void) {
+    /* 묶음 쓰기가 줄 중간에서 끊기면 끝까지 기록된 줄만 센다. */
+    const char data[] = "1\ta\t1\n"; /* 6바이트. 이후 행도 모두 6바이트 */
+    const AppendRow rows[3] = {{"b", 2}, {"c", 3}, {"d", 4}};
+    struct {
+        const char *name;
+        size_t limit;    /* 기존 6바이트 뒤로 허용할 바이트 */
+        size_t stored;
+    } cases[] = {
+        {"torn_mid_second", 6 + 3, 1},  /* b 완전, c 절반 */
+        {"torn_first", 3, 0},           /* b부터 절반 */
+        {"torn_on_boundary", 12, 2},    /* b, c 완전, d 0바이트 */
+    };
+
+    for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        const char *dir = fresh_dir(cases[k].name);
+        Table *t = NULL;
+        DbError err = {{0}};
+        int64_t first_id = -1;
+        size_t stored = 99;
+        int rc;
+
+        write_file(dir, data, sizeof data - 1);
+        CHECK(table_open(dir, &t, &err) == 0);
+        rc = append_rows_limited(t, rows, 3, (sizeof data - 1) + cases[k].limit,
+                                 &first_id, &stored, &err);
+        CHECK(rc == -1);
+        CHECK(stored == cases[k].stored);
+        CHECK(stored == 0 ? first_id == 0 : first_id == 2);
+        CHECK(strstr(err.msg, "데이터 파일 쓰기 실패") != NULL);
+        /* k의 근거: 실패 직후(닫기 전) 파일은 제한 크기까지 기록되어 있다. */
+        {
+            char buf[64];
+            CHECK(read_file(dir, buf, sizeof buf) == (sizeof data - 1) + cases[k].limit);
+        }
+        /* 쓰기 실패 뒤에는 Table을 쓸 수 없다. */
+        CHECK(table_append(t, "e", 5, NULL, &err) == -1);
+        (void)table_close(t, &err);
+    }
+}
+
+static void test_append_rows_torn_large_write(void) {
+    /* stdio 버퍼(4KB)보다 큰 묶음: fwrite가 직접 쓰다가 짧게 반환하는 경로. */
+    enum { ROWS = 40, CUT_AFTER = 17 };
+    static char name[NAME_MAX_BYTES + 1];
+    static char buf[ROWS * 300 + 64];
+    const char *dir = fresh_dir("torn_large");
+    const char data[] = "1\ta\t1\n";
+    AppendRow rows[ROWS];
+    Table *t = NULL;
+    DbError err = {{0}};
+    int64_t first_id = -1;
+    size_t stored = 99;
+    size_t limit = sizeof data - 1;
+    int rc;
+
+    memset(name, 'x', NAME_MAX_BYTES);
+    name[NAME_MAX_BYTES] = '\0';
+    for (int i = 0; i < ROWS; i++) {
+        rows[i].name = name;
+        rows[i].age = 100 + i;
+        /* 앞의 CUT_AFTER행은 끝까지, 그다음 행은 절반만 허용한다. */
+        if (i < CUT_AFTER) {
+            limit += (size_t)snprintf(NULL, 0, "%d\t%s\t%d\n", 2 + i, name, 100 + i);
+        } else if (i == CUT_AFTER) {
+            limit += 100;
+        }
+    }
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    rc = append_rows_limited(t, rows, ROWS, limit, &first_id, &stored, &err);
+    CHECK(rc == -1);
+    CHECK(stored == CUT_AFTER && first_id == 2);
+    CHECK(read_file(dir, buf, sizeof buf) == limit);
+    (void)table_close(t, &err);
+}
 #endif
+
+/* 묶음 쓰기에서 계산한 오프셋으로 모든 ID를 찾을 수 있다. 한 행 추가와 섞어도 이어진다. */
+static void test_append_rows_offsets(void) {
+    enum { BATCH = 1000 };
+    static AppendRow rows[BATCH];
+    const char *dir = fresh_dir("append_rows");
+    const char *names[3] = {"김민수", "abc", "이름이 조금 더 긴 사용자"};
+    Table *t = NULL;
+    DbError err = {{0}};
+    int64_t first_id = 0;
+    int64_t id = 0;
+    size_t stored = 0;
+
+    for (int i = 0; i < BATCH; i++) {
+        rows[i].name = names[i % 3];
+        rows[i].age = i % 151;
+    }
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_append(t, "first", 1, &id, &err) == 0 && id == 1);
+    CHECK(table_append_rows(t, rows, BATCH, &first_id, &stored, &err) == 0);
+    CHECK(first_id == 2 && stored == BATCH);
+    CHECK(table_append(t, "last", 2, &id, &err) == 0 && id == BATCH + 2);
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < BATCH; i++) {
+            Collected c;
+            c.count = 0;
+            c.stop_after = 0;
+            CHECK(table_find_id(t, 2 + i, collect_row, &c, &err) == 0);
+            CHECK(c.count == 1 && c.ids[0] == 2 + i && c.ages[0] == i % 151 &&
+                  strcmp(c.names[0], names[i % 3]) == 0);
+        }
+        {
+            Collected c;
+            c.count = 0;
+            c.stop_after = 0;
+            CHECK(table_find_id(t, BATCH + 2, collect_row, &c, &err) == 0);
+            CHECK(c.count == 1 && strcmp(c.names[0], "last") == 0);
+        }
+        /* 다시 열면 인덱스를 파일에서 새로 만든다. */
+        CHECK(table_close(t, &err) == 0);
+        CHECK(table_open(dir, &t, &err) == 0);
+    }
+    CHECK(table_append(t, "after reopen", 3, &id, &err) == 0 && id == BATCH + 3);
+
+    /* 저장할 수 없는 행이 하나라도 있으면 아무것도 쓰지 않는다. */
+    rows[BATCH - 1].age = 151;
+    stored = 99;
+    CHECK(table_append_rows(t, rows, BATCH, &first_id, &stored, &err) == -1);
+    CHECK(stored == 0 && strstr(err.msg, "저장할 수 없는 레코드") != NULL);
+    CHECK(table_append(t, "still usable", 4, &id, &err) == 0 && id == BATCH + 4);
+    CHECK(table_close(t, &err) == 0);
+}
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -1077,7 +1231,10 @@ int main(int argc, char **argv) {
     test_executor_multi_row();
 #ifndef _WIN32
     test_executor_multi_row_partial_write();
+    test_append_rows_torn_write();
+    test_append_rows_torn_large_write();
 #endif
+    test_append_rows_offsets();
 
     printf("단위 테스트: %d개 검사 중 %d개 실패\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

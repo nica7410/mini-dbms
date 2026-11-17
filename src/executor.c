@@ -1,5 +1,8 @@
 #include "executor.h"
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int validate_row(const InsertRow *row, DbError *err) {
@@ -60,29 +63,56 @@ static int validate_insert(const Statement *st, DbError *err) {
  * 쓰는 도중 저장에 실패하면 앞의 행은 이미 기록되어 남는다(추가 전용, rollback 없음).
  */
 static int run_insert(Table *t, const Statement *st, const ResultSink *sink, DbError *err) {
+    AppendRow one;
+    AppendRow *rows = &one;
+    int64_t first_id = 0;
+    size_t stored = 0;
+    bool reported = true;
+    int rc;
+
     if (validate_insert(st, err) != 0) {
         return -1;
     }
+    /* 한 행이면 스택 변수를 써서 기존 한 행 INSERT에 할당과 실패 경로를 늘리지 않는다. */
+    if (st->row_count > 1) {
+        rows = malloc(st->row_count * sizeof *rows);
+        if (rows == NULL) {
+            db_error_set(err, "메모리가 부족합니다");
+            return -1;
+        }
+    }
     for (size_t i = 0; i < st->row_count; i++) {
-        int64_t id;
+        rows[i].name = st->rows[i].name;
+        rows[i].age = st->rows[i].age;
+    }
+    /* 문장 하나의 행을 한 번에 쓰고 한 번 flush한다(group commit). */
+    rc = table_append_rows(t, rows, st->row_count, &first_id, &stored, err);
+    if (rows != &one) {
+        free(rows);
+    }
 
-        if (table_append(t, st->rows[i].name, st->rows[i].age, &id, err) != 0) {
-            /* 경로가 긴 메시지가 잘려도 기록 행 수는 남도록 앞에 붙인다. */
-            if (i > 0 && err != NULL) {
-                char msg[sizeof err->msg];
-                memcpy(msg, err->msg, sizeof msg);
-                db_error_set(err, "앞의 %u행은 기록됨: %s", (unsigned)i, msg);
-            }
-            return -1;
+    /* 실패했더라도 파일에 기록된 행은 순서대로 알린다(서버가 기록 범위를 안다). */
+    for (size_t i = 0; i < stored && reported; i++) {
+        reported = sink == NULL || sink->on_insert == NULL ||
+                   sink->on_insert(first_id + (int64_t)i, sink->ctx) == 0;
+    }
+    if (rc != 0) {
+        /* 저장 실패가 결과 콜백 실패보다 중요하므로 저장 오류만 보고한다.
+         * 경로가 긴 메시지가 잘려도 기록 행 수는 남도록 앞에 붙인다. */
+        if (stored > 0 && err != NULL) {
+            char msg[sizeof err->msg];
+            memcpy(msg, err->msg, sizeof msg);
+            db_error_set(err, "앞의 %u행은 기록됨: %s", (unsigned)stored, msg);
         }
-        if (sink != NULL && sink->on_insert != NULL && sink->on_insert(id, sink->ctx) != 0) {
-            if (st->row_count > 1) {
-                db_error_set(err, "앞의 %u행은 기록됨: 결과 출력에 실패했습니다", (unsigned)(i + 1));
-            } else {
-                db_error_set(err, "결과 출력에 실패했습니다");
-            }
-            return -1;
+        return -1;
+    }
+    if (!reported) {
+        if (st->row_count > 1) {
+            db_error_set(err, "앞의 %u행은 기록됨: 결과 출력에 실패했습니다", (unsigned)stored);
+        } else {
+            db_error_set(err, "결과 출력에 실패했습니다");
         }
+        return -1;
     }
     return 0;
 }

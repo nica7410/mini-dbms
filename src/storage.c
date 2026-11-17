@@ -15,6 +15,8 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #define make_dir(path) _mkdir(path)
 #define file_seek _fseeki64
 #define file_tell _ftelli64
@@ -33,6 +35,8 @@
 #define AGE_MAX_DIGITS 3
 /* 가장 긴 레코드: 19 + 1 + 255 + 1 + 3 = 279바이트. 넉넉히 잡고 넘으면 손상으로 본다. */
 #define LINE_CAP 320
+/* 쓰기 버퍼에서 한 레코드 줄이 차지할 수 있는 최대 바이트(LF 포함): 280 */
+#define RECORD_MAX_BYTES (ID_MAX_DIGITS + 1 + NAME_MAX_BYTES + 1 + AGE_MAX_DIGITS + 1)
 
 struct Table {
     FILE *fp;      /* "a+b": 읽기는 아무 위치에서, 쓰기는 항상 파일 끝 */
@@ -225,7 +229,10 @@ static bool table_usable(Table *t, DbError *err) {
     return true;
 }
 
-/* 인덱스로 위치를 찾아 fp에서 한 행을 읽는다. 없으면 0. */
+/* 인덱스로 위치를 찾아 fp에서 한 행을 읽는다. 없으면 0.
+ * 인덱스를 읽기 전에 반드시 table_usable을 확인한다. 쓰기 실패 뒤의 인덱스에는 파일에 없는
+ * 행을 가리키는 키가 남을 수 있다(table_append_rows 설명). 인덱스를 읽는 새 경로도 같은
+ * 규칙을 따라야 한다. */
 static int find_id_rows(Table *t, FILE *fp, int64_t id, RowFn fn, void *ctx, DbError *err) {
     int64_t offset;
     char line[LINE_CAP];
@@ -369,47 +376,172 @@ int table_reader_close(TableReader *r, DbError *err) {
 }
 
 int table_append(Table *t, const char *name, int age, int64_t *out_id, DbError *err) {
-    size_t name_len = strlen(name);
-    int64_t id;
-    int64_t offset;
-    BPTreeNode *leaf;
+    AppendRow row;
+    int64_t id = 0;
+    size_t stored = 0;
 
-    if (!table_usable(t, err)) {
+    row.name = name;
+    row.age = age;
+    if (table_append_rows(t, &row, 1, &id, &stored, err) != 0) {
         return -1;
     }
-    /* 파일 형식을 깨는 값은 Executor 검증과 별개로 여기서도 막는다. */
-    if (name_len == 0 || name_len > NAME_MAX_BYTES || strpbrk(name, "\t\r\n") != NULL ||
-        age < AGE_MIN || age > AGE_MAX) {
-        db_error_set(err, "저장할 수 없는 레코드입니다");
-        return -1;
-    }
-    if (t->last_id == INT64_MAX) {
-        db_error_set(err, "더 이상 부여할 ID가 없습니다");
-        return -1;
-    }
-    id = t->last_id + 1;
-
-    if (file_seek(t->fp, 0, SEEK_END) != 0 || (offset = file_tell(t->fp)) < 0) {
-        db_error_set(err, "데이터 파일 쓰기 준비 실패: %s (%s)", t->path, strerror(errno));
-        return -1;
-    }
-    /* 파일을 쓰기 전에 노드 공간을 확보하고, 쓰기가 끝난 뒤 키를 공개한다. */
-    leaf = reserve_index_entry(t, err);
-    if (leaf == NULL) {
-        return -1;
-    }
-    if (fprintf(t->fp, "%" PRId64 "\t%s\t%d\n", id, name, age) < 0 ||
-        fflush(t->fp) != 0) {
-        t->write_failed = true;
-        db_error_set(err, "데이터 파일 쓰기 실패: %s (%s)", t->path, strerror(errno));
-        return -1;
-    }
-    bptree_append(leaf, id, offset);
-    t->last_id = id;
     if (out_id != NULL) {
         *out_id = id;
     }
     return 0;
+}
+
+/* 열린 파일의 현재 크기. 쓰기 실패 뒤 실제로 기록된 바이트를 확인하는 데 쓴다. */
+static int file_size(FILE *fp, int64_t *out) {
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_fstat64(_fileno(fp), &st) != 0) {
+        return -1;
+    }
+#else
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0) {
+        return -1;
+    }
+#endif
+    *out = (int64_t)st.st_size;
+    return 0;
+}
+
+/* 파일 형식을 깨는 값은 Executor 검증과 별개로 여기서도 막는다. */
+static bool storable(const AppendRow *row) {
+    size_t name_len;
+
+    if (row->name == NULL) {
+        return false;
+    }
+    name_len = strlen(row->name);
+    return name_len > 0 && name_len <= NAME_MAX_BYTES &&
+           strpbrk(row->name, "\t\r\n") == NULL && row->age >= AGE_MIN && row->age <= AGE_MAX;
+}
+
+/*
+ * 순서:
+ *   1. 모든 행을 메모리 버퍼 하나에 레코드 줄로 만든다. ends[i]는 i번째 행의 끝 위치다.
+ *   2. 행마다 인덱스 키를 넣는다. 오프셋은 시작 위치 + 버퍼 안 위치로 계산한다.
+ *      출력 스트림에서 fseek하면 버퍼가 비워지므로 행마다 위치를 다시 묻지 않는다.
+ *   3. 키를 넣은 행까지 한 번에 fwrite하고 한 번 fflush한다.
+ * 키를 쓰기보다 먼저 넣는다. B+ 트리는 한 번에 한 자리만 확보할 수 있어서, 쓴 뒤에 넣다가
+ * 메모리가 부족하면 파일에는 있는데 인덱스에 없는 행이 생기기 때문이다. 먼저 넣어도 안전한
+ * 이유: 호출자가 쓰기 동안 reader를 막고(storage.h), 쓰기에 실패하면 write_failed로 Table
+ * 전체를 쓸 수 없게 되어 파일에 없는 행을 가리키는 키를 아무도 읽지 않는다.
+ * 키를 넣다가 메모리가 부족하면 이미 키를 넣은 앞쪽 행만 쓰고 실패를 반환한다.
+ */
+int table_append_rows(Table *t, const AppendRow *rows, size_t n, int64_t *first_id,
+                      size_t *stored, DbError *err) {
+    char local_buf[RECORD_MAX_BYTES + 1];
+    size_t local_end;
+    char *buf = local_buf;
+    size_t *ends = &local_end;
+    size_t cap = sizeof local_buf;
+    size_t len = 0;
+    size_t indexed = 0;
+    size_t done = 0;
+    int64_t start = 0;
+    int rc = -1;
+
+    if (first_id != NULL) {
+        *first_id = 0;
+    }
+    if (stored != NULL) {
+        *stored = 0;
+    }
+    if (!table_usable(t, err)) {
+        return -1;
+    }
+    if (rows == NULL || n == 0) {
+        db_error_set(err, "추가할 레코드가 없습니다");
+        return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!storable(&rows[i])) {
+            db_error_set(err, "저장할 수 없는 레코드입니다");
+            return -1;
+        }
+    }
+    if ((uint64_t)(INT64_MAX - t->last_id) < (uint64_t)n) {
+        db_error_set(err, "더 이상 부여할 ID가 없습니다");
+        return -1;
+    }
+    /* 한 행이면 스택 버퍼를 써서 기존 한 행 INSERT에 할당을 늘리지 않는다. */
+    if (n > 1) {
+        if (n > (SIZE_MAX - 1) / RECORD_MAX_BYTES) {
+            db_error_set(err, "한 번에 추가할 레코드가 너무 많습니다");
+            return -1;
+        }
+        cap = n * RECORD_MAX_BYTES + 1;
+        buf = malloc(cap);
+        ends = malloc(n * sizeof *ends);
+        if (buf == NULL || ends == NULL) {
+            db_error_set(err, "메모리가 부족합니다");
+            goto out;
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        int w = snprintf(buf + len, cap - len, "%" PRId64 "\t%s\t%d\n",
+                         t->last_id + 1 + (int64_t)i, rows[i].name, rows[i].age);
+        if (w < 0 || (size_t)w >= cap - len) {
+            db_error_set(err, "레코드를 만들지 못했습니다");
+            goto out;
+        }
+        len += (size_t)w;
+        ends[i] = len;
+    }
+
+    if (file_seek(t->fp, 0, SEEK_END) != 0 || (start = file_tell(t->fp)) < 0) {
+        db_error_set(err, "데이터 파일 쓰기 준비 실패: %s (%s)", t->path, strerror(errno));
+        goto out;
+    }
+    for (indexed = 0; indexed < n; indexed++) {
+        BPTreeNode *leaf = reserve_index_entry(t, err);
+        if (leaf == NULL) {
+            break; /* err에 원인. 앞쪽 indexed행만 쓴다 */
+        }
+        bptree_append(leaf, t->last_id + 1 + (int64_t)indexed,
+                      start + (int64_t)(indexed == 0 ? 0 : ends[indexed - 1]));
+    }
+    if (indexed == 0) {
+        goto out;
+    }
+    if (fwrite(buf, 1, ends[indexed - 1], t->fp) != ends[indexed - 1] || fflush(t->fp) != 0) {
+        int saved_errno = errno;
+        int64_t size;
+
+        t->write_failed = true;
+        /* 끝까지 기록된 줄만 센다. 크기를 모르면 0행으로 보고한다(많게 보고하지 않는다). */
+        if (file_size(t->fp, &size) == 0 && size > start) {
+            while (done < indexed && (int64_t)ends[done] <= size - start) {
+                done++;
+            }
+        }
+        db_error_set(err, "데이터 파일 쓰기 실패: %s (%s)", t->path, strerror(saved_errno));
+        goto out;
+    }
+    done = indexed;
+    rc = done == n ? 0 : -1;
+
+out:
+    if (done > 0) {
+        if (first_id != NULL) {
+            *first_id = t->last_id + 1;
+        }
+        t->last_id += (int64_t)done;
+    }
+    if (stored != NULL) {
+        *stored = done;
+    }
+    if (buf != local_buf) {
+        free(buf);
+    }
+    if (ends != &local_end) {
+        free(ends);
+    }
+    return rc;
 }
 
 int table_close(Table *t, DbError *err) {

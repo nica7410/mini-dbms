@@ -223,6 +223,6 @@ executor_run(INSERT):
 
 ### 남은 한계
 
-- 행마다 `fflush`하는 비용은 그대로다. 묶음 단위 flush(group commit)는 후속 작업이다.
+- 행마다 `fflush`하는 비용은 그대로다. 묶음 단위 flush(group commit)는 후속 작업이다. → [08](08-group-commit.md)에서 해결.
 - 부분 기록 실패 시 실패한 행은 stdio 버퍼에 남는다. 테이블을 닫을 때(`fclose`) 이 행이 다시 쓰일 수 있다. 기존 한 행 INSERT의 `unknown`과 같은 성질이며, 이번 작업에서 바꾸지 않았다. 단위 테스트는 닫기 전의 파일 상태만 확인한다.
 - 행 수 지표(`inserted_rows`)는 추가하지 않았다. `successful_inserts`는 문장 수다.

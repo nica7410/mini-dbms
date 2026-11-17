@@ -55,13 +55,13 @@ Executor
   validate_insert: 모든 행의 name 포인터·빈 문자열·255바이트·금지 문자, age 0~150 확인
     ↓
 Storage
-  행마다 table_append: 최대 ID + 1 → 텍스트로 기록 → fflush
+  table_append_rows: 모든 행을 버퍼 하나에 텍스트로 만듦(최대 ID + 1부터) → 인덱스 키 추가 → 한 번 fwrite·fflush
     ↓
 CLI
   count_insert로 행 수를 센 뒤 INSERT 1 출력 (여러 행이면 INSERT N)
 ```
 
-여러 행 INSERT(`VALUES (...), (...)`, Phase 3에서 추가)는 같은 흐름이다. 파서는 행 배열을 `realloc`으로 늘리며 최대 1,000행까지 받고, Executor는 모든 행을 검증한 뒤에만 첫 행부터 기록한다.
+여러 행 INSERT(`VALUES (...), (...)`, Phase 3에서 추가)는 같은 흐름이다. 파서는 행 배열을 `realloc`으로 늘리며 최대 1,000행까지 받고, Executor는 모든 행을 검증한 뒤에만 기록한다. 기록은 문장 단위로 한 번에 쓰고 한 번 flush한다(group commit). 쓰다가 실패하면 파일 크기로 끝까지 기록된 행 수를 센다.
 
 - `(name, age)`와 `(age, name)`은 컬럼 순서를 배열에 기록해 같은 위치의 값과 연결함.
 - 테이블·컬럼 이름과 값 타입은 Parser가 확인하고, Executor는 값의 제약을 확인함.

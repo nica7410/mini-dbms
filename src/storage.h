@@ -1,6 +1,7 @@
 #ifndef MINIDB_STORAGE_H
 #define MINIDB_STORAGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "common.h"
@@ -31,6 +32,23 @@ int table_open(const char *data_dir, Table **out, DbError *err);
 /* 다음 ID(최대 ID + 1)를 부여해 레코드 한 건을 파일 끝에 추가한다. */
 int table_append(Table *t, const char *name, int age, int64_t *out_id, DbError *err);
 
+typedef struct {
+    const char *name;
+    int age;
+} AppendRow;
+
+/*
+ * rows n개를 연속 ID로 파일 끝에 추가한다. 한 번에 쓰고 한 번 flush한다(group commit).
+ * 성공: 0, *stored == n.
+ * 실패: -1. *stored는 파일에 끝까지 기록된 앞쪽 행 수(0 이상)이고, 그 행들의 ID는
+ * *first_id부터 연속이다. 쓰기가 일부만 되고 실패하면 파일 크기로 이 수를 센다.
+ * 쓰기 실패 뒤에는 table_append와 마찬가지로 Table을 더 쓸 수 없다.
+ * 쓰기 전에 인덱스 메모리가 부족하면 앞쪽 일부만 쓰고 -1을 반환한다(*stored > 0일 수 있음).
+ * 이 경우는 쓰기 실패가 아니므로 Table을 계속 쓸 수 있다.
+ */
+int table_append_rows(Table *t, const AppendRow *rows, size_t n, int64_t *first_id,
+                      size_t *stored, DbError *err);
+
 /* 저장 순서대로 레코드를 하나씩 읽어 fn을 호출한다. fn이 NULL이면 검증만 한다. */
 int table_scan(Table *t, RowFn fn, void *ctx, DbError *err);
 
@@ -47,7 +65,7 @@ int table_close(Table *t, DbError *err);
  * - reader는 Table보다 먼저 닫아야 한다.
  * - 한 reader를 여러 스레드가 동시에 쓰면 안 된다. Table도 마찬가지다.
  *   (파일은 FILE 잠금 없이 읽으므로 같은 핸들의 동시 사용은 정의되지 않은 동작이다.)
- * - 인덱스를 공유하므로 reader 조회와 table_append가 동시에 실행되면 안 된다.
+ * - 인덱스를 공유하므로 reader 조회와 table_append·table_append_rows가 동시에 실행되면 안 된다.
  *   (읽기끼리는 동시에 실행해도 된다. 동기화는 호출자가 맡는다.)
  * 조회 규칙과 반환값은 table_scan / table_find_id와 같다.
  */
