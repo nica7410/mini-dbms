@@ -120,6 +120,29 @@ class ApiTest(unittest.TestCase):
                 status, inserted = restarted.query("INSERT INTO users (name, age) VALUES ('next', 26);")
                 self.assertEqual((status, inserted["inserted_id"]), (200, "2"))
 
+    def test_multi_row_insert_response(self):
+        with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory:
+            with Server(directory) as server:
+                # A single-row response keeps its previous fields and values.
+                status, single = server.query("INSERT INTO users (name, age) VALUES ('one', 1);")
+                self.assertEqual(status, 200)
+                self.assertEqual((single["inserted_id"], single["last_inserted_id"], single["affected_rows"],
+                                  single["write_outcome"]), ("1", "1", 1, "applied"))
+                status, batch = server.query(
+                    "INSERT INTO users (age, name) VALUES (2, 'a'), (3, 'b'), (4, 'O''Brien');")
+                self.assertEqual(status, 200)
+                self.assertEqual((batch["inserted_id"], batch["last_inserted_id"], batch["affected_rows"],
+                                  batch["write_outcome"]), ("2", "4", 3, "applied"))
+                status, selected = server.query("SELECT * FROM users WHERE id = 4;")
+                self.assertEqual(selected["rows"], [{"id": "4", "name": "O'Brien", "age": 4}])
+
+                status, invalid = server.query("INSERT INTO users (name, age) VALUES ('x', 1), ('y', 151);")
+                self.assertEqual((status, invalid["error"]["code"]), (422, "INVALID_VALUES"))
+                too_many = "INSERT INTO users (name, age) VALUES " + ", ".join(["('x', 1)"] * 1001) + ";"
+                status, rejected = server.query(too_many)
+                self.assertEqual((status, rejected["error"]["code"]), (400, "INVALID_SQL"))
+                self.assertEqual(server.query("SELECT * FROM users;")[1]["row_count"], 4)
+
     def test_future_id_becomes_visible_after_insert(self):
         with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory:
             with Server(directory) as server:

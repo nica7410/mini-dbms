@@ -110,6 +110,8 @@ worker에서는 기존 `parser_next`로 첫 문장을 읽고, 다시 호출하�
 
 독점 gate를 획득한 뒤 기존 `executor_run`을 호출한다. 기존 Storage가 파일과 인덱스 작업을 마치고 성공 callback을 호출하면, adapter는 ID와 `committed` 상태만 기록한다. 이 callback은 메모리를 할당하지 않고 C++ 예외를 밖으로 던지지 않는다.
 
+여러 행 INSERT(`VALUES (...), (...)`, 최대 1,000행)도 문장 하나이므로 gate를 한 번만 잡는다. callback은 행마다 한 번 불리며, adapter는 첫 ID·마지막 ID·개수만 갱신한다. gate가 문장 전체를 덮으므로 한 문장의 ID는 항상 연속이고, 다른 요청의 행과 섞이지 않는다. 응답은 `inserted_id`(첫 ID), `last_inserted_id`, `affected_rows`(행 수)다. 값 오류는 C executor가 모든 행을 검증한 뒤 기록하므로 한 행도 쓰지 않는다. 쓰는 도중 저장 실패로 일부 행만 기록되면 `STORAGE_ERROR`와 함께 `write_outcome: partial` 및 기록된 ID 범위를 돌려준다. 1,000행 상한은 gate 점유 시간(INSERT 한 건 약 13µs 기준 약 13ms, 추정)과 기본 SQL 크기 제한 64 KiB에 맞춘 값이다.
+
 여기서 `committed`/`write_outcome: applied`는 기존 C API가 INSERT 성공을 알렸다는 뜻이다. 트랜잭션 commit, WAL 기록, `fsync`에 의한 전원 장애 내구성을 추가한 뜻은 아니다. 기존 엔진의 flush·오류 처리 계약을 유지한다.
 
 ### SELECT
@@ -158,7 +160,7 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 | `pool.queue_wait_us`, `max_queue_wait_us` | enqueue에서 worker가 가져갈 때까지의 누적·최대 대기 |
 | `pool.expired` | worker의 실행 전 만료 검사에서 끝난 작업 수 |
 | `engine.requests` | adapter의 `execute` 호출 수. 만료된 요청은 포함하지 않음 |
-| `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과 |
+| `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과. 문장 단위로 센다(여러 행 INSERT도 1). 일부만 기록된 INSERT는 `errors`로 센다 |
 | `engine.current_executions`, `peak_executions` | C executor 호출(`executor_run`, `executor_run_read`) 범위의 현재·최대 중첩 수 |
 | `engine.lock_wait_us` | reader mutex와 gate의 누적 대기 |
 | `engine.lock_wait.<종류>.count` | 해당 잠금의 성공한 획득 횟수. 경합 없이 획득한 경우도 포함 |

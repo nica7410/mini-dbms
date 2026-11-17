@@ -47,19 +47,21 @@ INSERT INTO users (age, name) VALUES (25, '민수');
 
 ```text
 Parser
-  parse_insert → parse_columns → parse_values
+  parse_insert → parse_columns → parse_values (행마다 parse_row)
   컬럼 순서: [COL_AGE, COL_NAME]
-  Statement: kind=STMT_INSERT, age=25, name="민수"
+  Statement: kind=STMT_INSERT, row_count=1, rows[0]={name="민수", age=25}
     ↓
 Executor
-  validate_insert: name 포인터·빈 문자열·255바이트·금지 문자, age 0~150 확인
+  validate_insert: 모든 행의 name 포인터·빈 문자열·255바이트·금지 문자, age 0~150 확인
     ↓
 Storage
-  table_append: 최대 ID + 1 → 텍스트로 기록 → fflush
+  행마다 table_append: 최대 ID + 1 → 텍스트로 기록 → fflush
     ↓
 CLI
-  print_insert: INSERT 1 출력
+  count_insert로 행 수를 센 뒤 INSERT 1 출력 (여러 행이면 INSERT N)
 ```
+
+여러 행 INSERT(`VALUES (...), (...)`, Phase 3에서 추가)는 같은 흐름이다. 파서는 행 배열을 `realloc`으로 늘리며 최대 1,000행까지 받고, Executor는 모든 행을 검증한 뒤에만 첫 행부터 기록한다.
 
 - `(name, age)`와 `(age, name)`은 컬럼 순서를 배열에 기록해 같은 위치의 값과 연결함.
 - 테이블·컬럼 이름과 값 타입은 Parser가 확인하고, Executor는 값의 제약을 확인함.
@@ -131,7 +133,7 @@ SELECT 파일을 실행하면 시작 준비에서 한 번, 실제 조회에서 �
 | 자원 | 수명 |
 |---|---|
 | SQL 입력 버퍼 | main이 보관하다 free(sql) |
-| Statement.name | Parser가 할당, 실행 후 statement_free로 해제. 파싱 실패 경로에서도 정리 |
+| Statement.rows·각 행의 name | Parser가 할당, 실행 후 statement_free로 해제. 파싱 실패 경로에서도 이미 채운 행까지 정리 |
 | Table·파일 | table_open에서 준비, table_close에서 닫고 해제 |
 | Row.name | table_scan의 줄 버퍼를 참조. 콜백 중에만 사용, 보관하려면 복사 필요 |
 

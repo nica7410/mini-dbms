@@ -9,7 +9,7 @@ C17로 구현한 SQL 엔진과 CLI(Phase 1·2), 그리고 그 엔진을 여러 �
 3. [작업 목록](docs/tasks.md): 구현 단위와 검증 기준
 4. [구현설명서](docs/implementation.md): 전체 흐름에서 INSERT·SELECT 코드 따라가기
 
-지원 SQL은 `INSERT INTO users (name, age) VALUES (...)`, `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `--`·`/* */` 주석이다.
+지원 SQL은 `INSERT INTO users (name, age) VALUES (...)[, (...)]`(한 문장 최대 1,000행), `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `--`·`/* */` 주석이다.
 
 ## 빌드와 실행 (Windows, TDM-GCC)
 

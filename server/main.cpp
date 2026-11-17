@@ -191,13 +191,17 @@ drogon::HttpResponsePtr body_response(int status, std::string body) {
 
 drogon::HttpResponsePtr error_response(int status, const std::string &id,
                                       const std::string &code, const std::string &message,
-                                      const std::string &write_outcome = "") {
+                                      const std::string &write_outcome = "",
+                                      const Json::Value &extra = Json::Value()) {
     Json::Value value(Json::objectValue);
     value["ok"] = false;
     if (!id.empty()) value["request_id"] = id;
     value["error"]["code"] = code;
     value["error"]["message"] = valid_utf8(message) ? message : "DB engine returned an error";
     if (!write_outcome.empty()) value["write_outcome"] = write_outcome;
+    if (extra.isObject()) {
+        for (const auto &key : extra.getMemberNames()) value[key] = extra[key];
+    }
     auto response = body_response(status, serialize(value));
     if (status == 503) response->addHeader("Retry-After", "1");
     return response;
@@ -215,12 +219,31 @@ std::pair<int, const char *> query_error(minidb::QueryStatus status) {
     }
 }
 
+// IDs are strings so 64-bit values survive JavaScript clients.
+void add_inserted_range(Json::Value &value, std::int64_t first_id, std::int64_t last_id,
+                        std::size_t count) {
+    value["inserted_id"] = std::to_string(first_id);
+    value["last_inserted_id"] = std::to_string(last_id);
+    value["affected_rows"] = Json::UInt64(count);
+}
+
+void add_inserted_range(Json::Value &value, const minidb::QueryResult &result) {
+    add_inserted_range(value, result.inserted_id, result.last_inserted_id, result.inserted_count);
+}
+
 drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
                                      const std::string &id, std::size_t byte_limit) {
     if (result.status != minidb::QueryStatus::Ok) {
         const auto mapped = query_error(result.status);
-        const std::string outcome = result.committed ? "applied" :
-            (result.is_insert && result.status == minidb::QueryStatus::StorageError ? "unknown" : "");
+        if (result.is_insert && result.committed) {
+            // A multi-row INSERT failed after storing some rows. The reported
+            // range is stored; the next row is unknown; the rest never started.
+            Json::Value stored(Json::objectValue);
+            add_inserted_range(stored, result);
+            return error_response(mapped.first, id, mapped.second, result.error, "partial", stored);
+        }
+        const std::string outcome =
+            result.is_insert && result.status == minidb::QueryStatus::StorageError ? "unknown" : "";
         return error_response(mapped.first, id, mapped.second, result.error, outcome);
     }
     Json::Value value(Json::objectValue);
@@ -228,8 +251,7 @@ drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
     value["request_id"] = id;
     if (result.is_insert) {
         value["type"] = "insert";
-        value["inserted_id"] = std::to_string(result.inserted_id);
-        value["affected_rows"] = 1;
+        add_inserted_range(value, result);
         value["write_outcome"] = "applied";
     } else {
         value["type"] = "select";
@@ -338,7 +360,11 @@ int serve(const Options &options) {
             // own the SQL and callback; no request-local references enter the queue.
             const auto submitted = pool.try_submit(
                 [&, sql = std::move(sql), id, queued_at, done = callback](std::size_t worker) {
-                    bool applied = false;
+                    const char *outcome_on_throw = "unknown";
+                    // Copied as plain integers so the exception path can still report
+                    // which rows were stored without touching the QueryResult.
+                    std::int64_t first_id = 0, last_id = 0;
+                    std::size_t inserted = 0;
                     drogon::HttpResponsePtr response;
                     try {
                         if (Clock::now() - queued_at > std::chrono::milliseconds(options.queue_timeout_ms)) {
@@ -346,12 +372,20 @@ int serve(const Options &options) {
                             response = error_response(503, id, "QUEUE_TIMEOUT", "Task expired before SQL execution", "not_started");
                         } else {
                             auto result = engine.execute(worker, sql);
-                            applied = result.committed;
+                            if (result.committed) {
+                                outcome_on_throw =
+                                    result.status == minidb::QueryStatus::Ok ? "applied" : "partial";
+                                first_id = result.inserted_id;
+                                last_id = result.last_inserted_id;
+                                inserted = result.inserted_count;
+                            }
                             response = query_response(result, id, options.max_result_bytes);
                         }
                     } catch (const std::exception &) {
+                        Json::Value stored(Json::objectValue);
+                        if (inserted > 0) add_inserted_range(stored, first_id, last_id, inserted);
                         response = error_response(500, id, "INTERNAL_ERROR", "Request processing failed",
-                                                  applied ? "applied" : "unknown");
+                                                  outcome_on_throw, stored);
                     }
                     // Drogon hands the response back to the connection's I/O loop.
                     // Transmission failure never rolls back an already applied INSERT.

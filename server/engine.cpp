@@ -127,19 +127,33 @@ void fail(QueryResult& result, QueryStatus status, const char* message) {
     result.error = message;
 }
 
-bool valid_insert_values(const Statement& statement) noexcept {
-    if (statement.name == nullptr) return false;
-    const auto length = std::strlen(statement.name);
+bool valid_insert_row(const InsertRow& row) noexcept {
+    if (row.name == nullptr) return false;
+    const auto length = std::strlen(row.name);
     return length > 0 && length <= NAME_MAX_BYTES &&
-           std::strpbrk(statement.name, "\t\r\n") == nullptr &&
-           statement.age >= AGE_MIN && statement.age <= AGE_MAX;
+           std::strpbrk(row.name, "\t\r\n") == nullptr &&
+           row.age >= AGE_MIN && row.age <= AGE_MAX;
+}
+
+bool valid_insert_values(const Statement& statement) noexcept {
+    if (statement.rows == nullptr || statement.row_count == 0 ||
+        statement.row_count > INSERT_MAX_ROWS) {
+        return false;
+    }
+    for (std::size_t i = 0; i < statement.row_count; ++i) {
+        if (!valid_insert_row(statement.rows[i])) return false;
+    }
+    return true;
 }
 
 extern "C" {
 static int record_insert(std::int64_t id, void* opaque) noexcept {
     auto& result = *static_cast<QueryResult*>(opaque);
     // This callback must not allocate or fail after the C engine commits.
-    result.inserted_id = id;
+    // It runs once per stored row, in order.
+    if (result.inserted_count == 0) result.inserted_id = id;
+    result.last_inserted_id = id;
+    ++result.inserted_count;
     result.committed = true;
     return 0;
 }

@@ -304,6 +304,30 @@ def a6_select_output_kept_before_failure(env):
     eq(env.data(), b"1\ta\t1\n", "실패 뒤 INSERT는 실행되지 않음")
 
 
+# ---------- 다중 행 INSERT ----------
+
+@test
+def multi_row_insert_then_select(env):
+    sql = (
+        "INSERT INTO users (age, name) VALUES (25, '민수'), (30, 'O''Brien'),\n  (41, '지영');\n"
+        "INSERT INTO users (name, age) VALUES ('한명', 1);\n"
+        "SELECT * FROM users;\n"
+    )
+    rows = u("1\t민수\t25\n2\tO'Brien\t30\n3\t지영\t41\n4\t한명\t1\n")
+    expect_ok(env.run(sql), b"INSERT 3\nINSERT 1\n" + HEADER + rows)
+    eq(env.data(), rows, "저장 파일")
+
+
+@test
+def multi_row_invalid_row_saves_nothing(env):
+    expect_ok(env.run("INSERT INTO users (name, age) VALUES ('first', 1);"), b"INSERT 1\n")
+    expect_fail(env.run("INSERT INTO users (name, age) VALUES ('a', 2), ('b', 151), ('c', 3);"),
+                "문장 1", "2번째 행", "151")
+    expect_fail(env.run("INSERT INTO users (name, age) VALUES ('a', 2), ('b');"),
+                "문장 1", "2번째 행", "값이 컬럼보다 적습니다")
+    eq(env.data(), b"1\tfirst\t1\n", "실패한 묶음은 한 행도 저장하지 않음")
+
+
 # ---------- A7: 빈 입력·빈 테이블·파일 오류 ----------
 
 @test

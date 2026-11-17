@@ -29,8 +29,14 @@ struct QueryResult {
     QueryStatus status = QueryStatus::InternalError;
     bool is_insert = false;
     // A later response/transport failure never rolls an INSERT back.
+    // True once at least one row of the INSERT was stored. With a multi-row
+    // INSERT and a storage failure this can be true while status is an error.
     bool committed = false;
+    // IDs within one INSERT statement are consecutive: the whole statement runs
+    // under the exclusive gate. inserted_id is the first ID.
     std::int64_t inserted_id = 0;
+    std::int64_t last_inserted_id = 0;
+    std::size_t inserted_count = 0;
     std::vector<OwnedRow> rows;
     std::string error;
 };

@@ -1,4 +1,5 @@
 #include "engine.hpp"
+#include "c_api.hpp" // INSERT_MAX_ROWS
 
 #include <algorithm>
 #include <atomic>
@@ -418,6 +419,115 @@ void test_write_failure_is_global() {
 #endif
 }
 
+std::string multi_row_insert(std::size_t rows, const std::string& name) {
+    std::string sql = "INSERT INTO users (name, age) VALUES ";
+    for (std::size_t i = 0; i < rows; ++i) {
+        if (i != 0) sql += ", ";
+        sql += "('" + name + "', " + std::to_string(i % 151) + ")";
+    }
+    return sql + ";";
+}
+
+void test_multi_row_insert_results() {
+    TempDirectory directory;
+    Engine engine(directory.options(2));
+
+    const auto single = engine.execute(0, "INSERT INTO users (name, age) VALUES ('one', 1);");
+    require(single.status == QueryStatus::Ok && single.committed && single.inserted_count == 1 &&
+            single.inserted_id == 1 && single.last_inserted_id == 1, "single-row insert range differs");
+
+    const auto batch = engine.execute(1, multi_row_insert(3, "batch"));
+    require(batch.status == QueryStatus::Ok && batch.committed && batch.inserted_count == 3 &&
+            batch.inserted_id == 2 && batch.last_inserted_id == 4, "multi-row insert range differs");
+    const auto found = engine.execute(0, "SELECT * FROM users WHERE id = 4;");
+    require(found.status == QueryStatus::Ok && found.rows.size() == 1 && found.rows[0].name == "batch",
+            "last row of a batch is not visible");
+
+    // A bad value in any row rejects the whole statement before writing.
+    const auto invalid = engine.execute(0,
+        "INSERT INTO users (name, age) VALUES ('ok', 1), ('bad', 151), ('ok', 2);");
+    require(invalid.status == QueryStatus::InvalidValues && !invalid.committed &&
+            invalid.inserted_count == 0, "an invalid row was not classified before writing");
+
+    const auto too_many = engine.execute(0, multi_row_insert(INSERT_MAX_ROWS + 1, "x"));
+    require(too_many.status == QueryStatus::InvalidSql && !too_many.committed,
+            "the per-statement row limit was not enforced");
+    const auto at_limit = engine.execute(1, multi_row_insert(INSERT_MAX_ROWS, "x"));
+    require(at_limit.status == QueryStatus::Ok && at_limit.inserted_count == INSERT_MAX_ROWS,
+            "a batch at the row limit failed");
+
+    const auto scan = engine.execute(0, "SELECT * FROM users;");
+    require(scan.status == QueryStatus::Ok && scan.rows.size() == 4 + INSERT_MAX_ROWS,
+            "rejected batches changed the table");
+}
+
+void test_parallel_batches_are_contiguous() {
+    TempDirectory directory;
+    Engine engine(directory.options(4));
+    constexpr std::size_t workers = 4;
+    constexpr std::size_t batches = 25;
+    constexpr std::size_t rows = 10;
+    struct Range { std::int64_t first; std::int64_t last; std::string name; };
+    std::mutex ranges_mutex;
+    std::vector<Range> ranges;
+    parallel(workers, [&](std::size_t worker) {
+        for (std::size_t item = 0; item < batches; ++item) {
+            const auto name = "w" + std::to_string(worker) + "b" + std::to_string(item);
+            const auto result = engine.execute(worker, multi_row_insert(rows, name));
+            require(result.status == QueryStatus::Ok && result.inserted_count == rows &&
+                    result.last_inserted_id - result.inserted_id == static_cast<std::int64_t>(rows - 1),
+                    "a parallel batch did not receive consecutive IDs");
+            std::lock_guard<std::mutex> lock(ranges_mutex);
+            ranges.push_back({result.inserted_id, result.last_inserted_id, name});
+        }
+    });
+    std::sort(ranges.begin(), ranges.end(),
+              [](const Range& a, const Range& b) { return a.first < b.first; });
+    require(ranges.size() == workers * batches, "parallel batches lost responses");
+    std::int64_t expected = 1;
+    for (const auto& range : ranges) {
+        require(range.first == expected, "parallel batch ranges overlap or leave a gap");
+        expected = range.last + 1;
+    }
+    // Every stored row inside a batch's range belongs to that batch: no interleaving.
+    const auto scan = engine.execute(0, "SELECT * FROM users;");
+    require(scan.status == QueryStatus::Ok && scan.rows.size() == workers * batches * rows,
+            "parallel batches lost rows");
+    for (const auto& range : ranges) {
+        for (auto id = range.first; id <= range.last; ++id) {
+            require(scan.rows[static_cast<std::size_t>(id - 1)].name == range.name,
+                    "rows from different batches were interleaved");
+        }
+    }
+    require(engine.stats().successful_inserts == workers * batches,
+            "insert statistics should count statements");
+}
+
+void test_multi_row_partial_write() {
+#if defined(__linux__)
+    TempDirectory directory;
+    Engine engine(directory.options(2));
+    rlimit previous{};
+    require(getrlimit(RLIMIT_FSIZE, &previous) == 0, "getrlimit failed");
+    const auto old_handler = std::signal(SIGXFSZ, SIG_IGN);
+    require(old_handler != SIG_ERR, "unable to suppress SIGXFSZ in fault test");
+    rlimit limited = previous;
+    limited.rlim_cur = std::string("1\tp1\t1\n").size(); // room for the first row only
+    if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, old_handler);
+        throw std::runtime_error("unable to inject a file-size write failure");
+    }
+    const auto failed = engine.execute(0, "INSERT INTO users (name, age) VALUES ('p1', 1), ('p2', 2);");
+    const int restored = setrlimit(RLIMIT_FSIZE, &previous);
+    std::signal(SIGXFSZ, old_handler);
+    require(restored == 0, "unable to restore the file-size limit");
+    require(failed.status == QueryStatus::StorageError && failed.committed &&
+            failed.inserted_count == 1 && failed.inserted_id == 1 && failed.last_inserted_id == 1,
+            "a partial batch did not report the stored range");
+    require(!engine.healthy(), "a partial batch failure did not mark the engine unhealthy");
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -431,6 +541,9 @@ int main() {
         test_parallel_readers();
         test_parallel_inserts_and_worker_reuse();
         test_write_failure_is_global();
+        test_multi_row_insert_results();
+        test_parallel_batches_are_contiguous();
+        test_multi_row_partial_write();
         std::cout << "engine tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -67,9 +67,21 @@ JSON
   "request_id": "1",
   "type": "insert",
   "inserted_id": "1",
+  "last_inserted_id": "1",
   "affected_rows": 1,
   "write_outcome": "applied"
 }
+```
+
+한 문장으로 여러 행(최대 1,000행)을 넣을 수 있다. 요청 본문 크기 제한(`max_sql_bytes`, 기본 64 KiB)도 함께 적용되므로, 이름이 길면 1,000행 전에 막힐 수 있다(255바이트 이름이면 약 240행). 문장 하나라서 write gate를 한 번만 잡고, 한 문장의 ID는 항상 연속이다. `inserted_id`는 첫 ID, `last_inserted_id`는 마지막 ID, `affected_rows`는 행 수다.
+
+```json
+{"sql":"INSERT INTO users (name, age) VALUES ('지영', 41), ('현우', 30);"}
+```
+
+```json
+{"ok": true, "request_id": "2", "type": "insert",
+ "inserted_id": "2", "last_inserted_id": "3", "affected_rows": 2, "write_outcome": "applied"}
 ```
 
 ```bash
@@ -88,13 +100,14 @@ curl -sS http://127.0.0.1:8080/query \
 }
 ```
 
-`id`와 `inserted_id`는 JSON 문자열이다. 기존 엔진의 64비트 ID를 JavaScript 클라이언트에서 정밀도 손실 없이 전달하기 위한 계약이다. `request_id`도 문자열이며 서버 프로세스 안에서 증가한다. 재시작 사이에 유일한 ID나 중복 실행 방지 키는 아니다.
+`id`, `inserted_id`, `last_inserted_id`는 JSON 문자열이다. 기존 엔진의 64비트 ID를 JavaScript 클라이언트에서 정밀도 손실 없이 전달하기 위한 계약이다. `request_id`도 문자열이며 서버 프로세스 안에서 증가한다. 재시작 사이에 유일한 ID나 중복 실행 방지 키는 아니다.
 
 지원 SQL은 기존 CLI와 같다.
 
 | 문장 | 동작 |
 |---|---|
 | `INSERT INTO users (name, age) VALUES ('이름', 25);` | 자동 ID를 부여하고 TSV와 writer 인덱스에 추가 |
+| `INSERT INTO users (name, age) VALUES ('a', 1), ('b', 2);` | 최대 1,000행. 모든 행을 검증한 뒤 연속 ID로 추가 |
 | `SELECT * FROM users WHERE id = 1;` | B+ 트리를 통한 ID 검색 |
 | `SELECT * FROM users WHERE age = 25;` | TSV 순차 탐색 |
 | `SELECT * FROM users;` | 전체 순차 탐색, 결과 상한 적용 |
@@ -143,6 +156,7 @@ curl -sS http://127.0.0.1:8080/metrics
 | `applied` | C 엔진의 INSERT 성공 콜백을 확인함. 이후 응답 생성·전송 실패로 되돌리지 않음 |
 | `not_started` | 큐 수락 실패, 종료 거절, 대기 만료 등으로 SQL을 시작하지 않음 |
 | `unknown` | 저장 또는 내부 실패 때문에 이 응답만으로 적용 여부를 확정할 수 없음 |
+| `partial` | 여러 행 INSERT가 쓰는 도중 저장에 실패함. 응답의 `inserted_id`~`last_inserted_id`(`affected_rows`개)는 기록됨. 그다음 행은 `unknown`과 같고, 나머지 행은 시작하지 않음. 응답 생성 중 예외(`INTERNAL_ERROR`)가 나도 같은 범위 필드를 넣음 |
 
 클라이언트가 응답을 받지 못했다고 INSERT가 실행되지 않은 것은 아니다. 이 API는 idempotency key나 자동 rollback을 제공하지 않으므로 확인 없이 INSERT를 재전송하면 중복 행이 생길 수 있다. `applied`는 `fsync`를 통한 전원 장애 내구성 보장과도 다르다.
 

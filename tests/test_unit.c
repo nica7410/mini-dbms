@@ -123,7 +123,7 @@ static int parse_one(const char *sql, Statement *st, DbError *err) {
             fprintf(stderr, "    SQL: %s\n    메시지: %s\n    기대: %s\n", (sql), e_.msg, \
                     (needle));                                                            \
         }                                                                                 \
-        CHECK(st_.name == NULL);                                                          \
+        CHECK(st_.rows == NULL);                                                          \
         if (r_ == 1) {                                                                    \
             statement_free(&st_);                                                         \
         }                                                                                 \
@@ -137,11 +137,11 @@ static void test_parse_insert_basic(void) {
 
     CHECK(parser_next(sql, &pos, &st, &err) == 1);
     CHECK(st.kind == STMT_INSERT);
-    CHECK(st.name != NULL && strcmp(st.name, "민수") == 0);
-    CHECK(st.age == 25);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "민수") == 0);
+    CHECK(st.rows[0].age == 25);
     CHECK(pos == strlen(sql));
     statement_free(&st);
-    CHECK(st.name == NULL);
+    CHECK(st.rows == NULL && st.row_count == 0);
     statement_free(&st); /* 두 번 호출해도 안전 */
 }
 
@@ -151,8 +151,8 @@ static void test_parse_column_order_and_case(void) {
 
     CHECK(parse_one("insert into USERS (Age, NAME) values (30, 'O''Brien');", &st, &err) == 1);
     CHECK(st.kind == STMT_INSERT);
-    CHECK(st.name != NULL && strcmp(st.name, "O'Brien") == 0);
-    CHECK(st.age == 30);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "O'Brien") == 0);
+    CHECK(st.rows[0].age == 30);
     statement_free(&st);
 }
 
@@ -162,13 +162,13 @@ static void test_parse_string_special_and_multiline(void) {
 
     CHECK(parse_one("INSERT\n  INTO users\n(name,\tage)\r\nVALUES\n('a;b ''c''',\n 0)\n;", &st,
                     &err) == 1);
-    CHECK(st.name != NULL && strcmp(st.name, "a;b 'c'") == 0);
-    CHECK(st.age == 0);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "a;b 'c'") == 0);
+    CHECK(st.rows[0].age == 0);
     statement_free(&st);
 
     CHECK(parse_one("INSERT INTO users (name, age) VALUES ('''', 150);", &st, &err) == 1);
-    CHECK(st.name != NULL && strcmp(st.name, "'") == 0);
-    CHECK(st.age == 150);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "'") == 0);
+    CHECK(st.rows[0].age == 150);
     statement_free(&st);
 }
 
@@ -180,7 +180,7 @@ static void test_parse_select_and_sequence(void) {
 
     CHECK(parser_next(sql, &pos, &st, &err) == 1);
     CHECK(st.kind == STMT_SELECT);
-    CHECK(st.name == NULL);
+    CHECK(st.rows == NULL && st.row_count == 0);
     statement_free(&st);
 
     CHECK(parser_next(sql, &pos, &st, &err) == 1);
@@ -221,7 +221,7 @@ static void test_parse_comments_around_and_inside(void) {
     size_t pos = 0;
 
     CHECK(parser_next(sql, &pos, &st, &err) == 1);
-    CHECK(st.kind == STMT_INSERT && st.name != NULL && strcmp(st.name, "a") == 0 && st.age == 1);
+    CHECK(st.kind == STMT_INSERT && st.row_count == 1 && strcmp(st.rows[0].name, "a") == 0 && st.rows[0].age == 1);
     statement_free(&st);
     CHECK(parser_next(sql, &pos, &st, &err) == 1);
     CHECK(st.kind == STMT_SELECT);
@@ -230,7 +230,7 @@ static void test_parse_comments_around_and_inside(void) {
 
     /* 음수는 여전히 정수 토큰, -- 만 주석이다. */
     CHECK(parse_one("INSERT INTO users (name, age) VALUES ('a', -1);", &st, &err) == 1);
-    CHECK(st.age == -1);
+    CHECK(st.rows[0].age == -1);
     statement_free(&st);
 }
 
@@ -240,12 +240,12 @@ static void test_parse_comment_symbols_in_string(void) {
 
     CHECK(parse_one("INSERT INTO users (name, age) VALUES ('a--b /* c */ d', 1);", &st, &err) ==
           1);
-    CHECK(st.name != NULL && strcmp(st.name, "a--b /* c */ d") == 0);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "a--b /* c */ d") == 0);
     statement_free(&st);
 
     CHECK(parse_one("INSERT INTO users (name, age) VALUES ('/* 열기만', 2); -- '닫기 */'", &st,
                     &err) == 1);
-    CHECK(st.name != NULL && strcmp(st.name, "/* 열기만") == 0 && st.age == 2);
+    CHECK(st.row_count == 1 && strcmp(st.rows[0].name, "/* 열기만") == 0 && st.rows[0].age == 2);
     statement_free(&st);
 }
 
@@ -531,13 +531,13 @@ static int count_insert(int64_t id, void *ctx) {
 
 static void expect_exec_error(Table *t, const char *name, int age, const char *needle) {
     char buf[300];
-    Statement st = {STMT_INSERT, NULL, 0, WHERE_NONE, 0};
+    InsertRow row;
+    Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
     DbError err = {{0}};
 
     snprintf(buf, sizeof buf, "%s", name);
-    st.kind = STMT_INSERT;
-    st.name = buf;
-    st.age = age;
+    row.name = buf;
+    row.age = age;
     CHECK(executor_run(t, &st, NULL, &err) == -1);
     CHECK(strstr(err.msg, needle) != NULL);
     if (strstr(err.msg, needle) == NULL) {
@@ -572,16 +572,14 @@ static void test_executor_validation(void) {
 
     /* 경계값은 성공한다. */
     {
-        Statement st = {STMT_INSERT, NULL, 0, WHERE_NONE, 0};
+        InsertRow row = {name255, 0};
+        Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
         int64_t last = 0;
         ResultSink sink = {count_insert, NULL, &last};
 
         CHECK(table_open(dir, &t, &err) == 0);
-        st.kind = STMT_INSERT;
-        st.name = name255;
-        st.age = 0;
         CHECK(executor_run(t, &st, &sink, &err) == 0 && last == 1);
-        st.age = 150;
+        row.age = 150;
         CHECK(executor_run(t, &st, &sink, &err) == 0 && last == 2);
         CHECK(table_close(t, &err) == 0);
     }
@@ -595,7 +593,8 @@ static void test_executor_insert_select(void) {
     int64_t last = 0;
     char kim[] = "kim";
     char lee[] = "lee";
-    Statement ins = {STMT_INSERT, kim, 20, WHERE_NONE, 0};
+    InsertRow row = {kim, 20};
+    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
     Statement sel = {STMT_SELECT, NULL, 0, WHERE_NONE, 0};
     ResultSink sink;
 
@@ -606,8 +605,8 @@ static void test_executor_insert_select(void) {
 
     CHECK(table_open(dir, &t, &err) == 0);
     CHECK(executor_run(t, &ins, &sink, &err) == 0 && last == 1);
-    ins.name = lee;
-    ins.age = 21;
+    row.name = lee;
+    row.age = 21;
     CHECK(executor_run(t, &ins, &sink, &err) == 0 && last == 2);
 
     sink.ctx = &c;
@@ -782,8 +781,9 @@ static void test_reader_executor(void) {
     Table *t = NULL;
     TableReader *r = NULL;
     DbError err = {{0}};
+    InsertRow row = {kim, 20};
     Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25};
-    Statement ins = {STMT_INSERT, kim, 20, WHERE_NONE, 0};
+    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
     ResultSink sink = {NULL, collect_row, NULL};
     Collected c;
 
@@ -847,6 +847,187 @@ static void test_reader_after_write_failure(void) {
 }
 #endif
 
+/* ---------- 다중 행 INSERT ---------- */
+
+#define INS_PREFIX "INSERT INTO users (name, age) VALUES "
+
+static void test_parse_multi_row(void) {
+    Statement st;
+    DbError err = {{0}};
+
+    /* 컬럼 순서 (age, name)이 모든 행에 적용된다. */
+    CHECK(parse_one("insert into users (age, name) values (1, 'a'), (2, 'O''Brien') ,\n(3,'c');",
+                    &st, &err) == 1);
+    CHECK(st.kind == STMT_INSERT && st.row_count == 3);
+    if (st.row_count == 3) {
+        CHECK(strcmp(st.rows[0].name, "a") == 0 && st.rows[0].age == 1);
+        CHECK(strcmp(st.rows[1].name, "O'Brien") == 0 && st.rows[1].age == 2);
+        CHECK(strcmp(st.rows[2].name, "c") == 0 && st.rows[2].age == 3);
+    }
+    statement_free(&st);
+    CHECK(st.rows == NULL && st.row_count == 0);
+    statement_free(&st); /* 두 번 호출해도 안전 */
+}
+
+static void test_parse_multi_row_errors(void) {
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1),;", "2번째 행: 구문 오류: 여는 괄호");
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1), ('b');", "2번째 행: 값이 컬럼보다 적습니다");
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1), ('b', 2, 3);", "2번째 행: 값이 컬럼보다 많습니다");
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1), ('b', 2), (3, 'c');", "3번째 행: name에는");
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1) ('b', 2);", "세미콜론");
+    EXPECT_PARSE_ERROR(INS_PREFIX ";", "여는 괄호");
+    /* 쉼표 바로 뒤 토큰의 lexer 오류에도 행 번호가 붙는다. */
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a', 1), 'abc", "2번째 행: 문자열이 닫히지");
+    /* 첫 행의 오류 메시지는 한 행 문장과 같다(행 번호 없음). */
+    EXPECT_PARSE_ERROR(INS_PREFIX "('a'), ('b', 2);", "값이 컬럼보다 적습니다");
+}
+
+/* 잘린 오류 메시지 끝에 미완성 UTF-8 문자가 남지 않는다. */
+static void test_error_utf8_truncation(void) {
+    char long_msg[400];
+    DbError err;
+    size_t len;
+    int i;
+
+    long_msg[0] = 'a';
+    for (i = 0; i < 100; i++) {
+        memcpy(long_msg + 1 + i * 3, "\xEA\xB0\x80", 3); /* '가' */
+    }
+    long_msg[301] = '\0';
+    db_error_set(&err, "%s", long_msg);
+    len = strlen(err.msg);
+    /* 255바이트 중 'a' 1 + 완성된 '가' 84개(252) = 253. 남은 2바이트는 지운다. */
+    CHECK(len == 253);
+    CHECK(memcmp(err.msg, long_msg, len) == 0);
+
+    db_error_set(&err, "%s", "짧은 메시지");
+    CHECK(strcmp(err.msg, "짧은 메시지") == 0);
+}
+
+/* rows개의 ('a', 1) 행으로 된 INSERT 문장. 호출자가 free한다. */
+static char *multi_row_sql(int rows) {
+    size_t cap = sizeof INS_PREFIX + (size_t)rows * 10 + 2;
+    char *sql = malloc(cap);
+    size_t n;
+    int i;
+
+    if (sql == NULL) {
+        fprintf(stderr, "메모리 부족\n");
+        exit(2);
+    }
+    n = (size_t)snprintf(sql, cap, "%s", INS_PREFIX);
+    for (i = 0; i < rows; i++) {
+        n += (size_t)snprintf(sql + n, cap - n, "%s('a', 1)", i == 0 ? "" : ",");
+    }
+    snprintf(sql + n, cap - n, ";");
+    return sql;
+}
+
+static void test_parse_row_limit(void) {
+    Statement st;
+    DbError err = {{0}};
+    char *sql = multi_row_sql(INSERT_MAX_ROWS);
+
+    CHECK(parse_one(sql, &st, &err) == 1 && st.row_count == INSERT_MAX_ROWS);
+    statement_free(&st);
+    free(sql);
+
+    sql = multi_row_sql(INSERT_MAX_ROWS + 1);
+    CHECK(parse_one(sql, &st, &err) == -1);
+    CHECK(strstr(err.msg, "최대 1000개") != NULL);
+    free(sql);
+}
+
+typedef struct {
+    int count;
+    int64_t ids[8];
+} InsertedIds;
+
+static int record_ids(int64_t id, void *ctx) {
+    InsertedIds *c = ctx;
+
+    if (c->count < 8) {
+        c->ids[c->count] = id;
+    }
+    c->count++;
+    return 0;
+}
+
+static void test_executor_multi_row(void) {
+    const char *dir = fresh_dir("exec_multi");
+    char a[] = "a";
+    char b[] = "b";
+    char c[] = "c";
+    InsertRow rows[3] = {{a, 1}, {b, 2}, {c, 151}};
+    Statement st = {STMT_INSERT, rows, 3, WHERE_NONE, 0};
+    InsertedIds ids;
+    ResultSink sink = {record_ids, NULL, &ids};
+    Table *t = NULL;
+    DbError err = {{0}};
+    Collected got;
+    char buf[64];
+
+    CHECK(table_open(dir, &t, &err) == 0);
+    /* 마지막 행의 값이 틀리면 앞의 행도 기록하지 않는다. */
+    memset(&ids, 0, sizeof ids);
+    CHECK(executor_run(t, &st, &sink, &err) == -1);
+    CHECK(strstr(err.msg, "3번째 행: age 값 151") != NULL);
+    CHECK(ids.count == 0);
+    CHECK(read_file(dir, buf, sizeof buf) == 0);
+
+    /* 성공하면 ID가 연속이고 콜백은 행 순서대로 호출된다. */
+    rows[2].age = 3;
+    CHECK(executor_run(t, &st, &sink, &err) == 0);
+    CHECK(ids.count == 3 && ids.ids[0] == 1 && ids.ids[1] == 2 && ids.ids[2] == 3);
+    memset(&got, 0, sizeof got);
+    CHECK(table_scan(t, collect_row, &got, &err) == 0 && got.count == 3);
+    CHECK(strcmp(got.names[0], "a") == 0 && strcmp(got.names[2], "c") == 0 && got.ages[2] == 3);
+    CHECK(table_close(t, &err) == 0);
+}
+
+#ifndef _WIN32
+static void test_executor_multi_row_partial_write(void) {
+    /* 파일 크기 제한으로 두 번째 행부터 쓰기를 실패시킨다. 첫 행은 기록된 채 남는다. */
+    const char *dir = fresh_dir("exec_multi_partial");
+    const char data[] = "1\ta\t1\n";
+    const char first_line[] = "2\tb\t2\n";
+    char b[] = "b";
+    char c[] = "c";
+    InsertRow rows[2] = {{b, 2}, {c, 3}};
+    Statement st = {STMT_INSERT, rows, 2, WHERE_NONE, 0};
+    InsertedIds ids;
+    ResultSink sink = {record_ids, NULL, &ids};
+    Table *t = NULL;
+    DbError err = {{0}};
+    struct rlimit previous;
+    struct rlimit limited;
+    void (*old_handler)(int);
+    char buf[64];
+    int rc;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    memset(&ids, 0, sizeof ids);
+    CHECK(getrlimit(RLIMIT_FSIZE, &previous) == 0);
+    old_handler = signal(SIGXFSZ, SIG_IGN);
+    limited = previous;
+    limited.rlim_cur = (sizeof data - 1) + (sizeof first_line - 1);
+    CHECK(setrlimit(RLIMIT_FSIZE, &limited) == 0);
+    rc = executor_run(t, &st, &sink, &err);
+    CHECK(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+    signal(SIGXFSZ, old_handler);
+
+    CHECK(rc == -1);
+    CHECK(strstr(err.msg, "앞의 1행은 기록됨") != NULL);
+    CHECK(ids.count == 1 && ids.ids[0] == 2);
+    /* 닫기 전 디스크 상태. 닫을 때 stdio 버퍼에 남은 실패 행이 다시 쓰일 수 있으므로
+     * (기존 한 행 INSERT와 같은 '상태 알 수 없음') 닫은 뒤의 내용은 검사하지 않는다. */
+    CHECK(read_file(dir, buf, sizeof buf) == (sizeof data - 1) + (sizeof first_line - 1));
+    CHECK(strcmp(buf, "1\ta\t1\n2\tb\t2\n") == 0);
+    (void)table_close(t, &err);
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "사용법: test_unit <임시 디렉터리>\n");
@@ -887,6 +1068,15 @@ int main(int argc, char **argv) {
     test_reader_executor();
 #ifndef _WIN32
     test_reader_after_write_failure();
+#endif
+
+    test_parse_multi_row();
+    test_parse_multi_row_errors();
+    test_parse_row_limit();
+    test_error_utf8_truncation();
+    test_executor_multi_row();
+#ifndef _WIN32
+    test_executor_multi_row_partial_write();
 #endif
 
     printf("단위 테스트: %d개 검사 중 %d개 실패\n", g_checks, g_failures);

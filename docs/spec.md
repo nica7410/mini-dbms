@@ -9,6 +9,8 @@
 
 아래 스펙은 2026-11-12 사용자가 제안 그대로 승인해 확정했다(DB-D02).
 
+2026-11-17 사용자 지시로 여러 행 INSERT(`VALUES (...), (...)`)를 추가했다. 한 행 문장의 동작과 출력은 그대로다. 근거와 범위는 [다중 행 INSERT 계획](plans/phase3-improvements/07-multi-row-insert.md)에 있다.
+
 ## 한눈에 보는 동작
 
 ```mermaid
@@ -17,11 +19,11 @@ flowchart TD
     CLI --> PARSE["Parser<br/>SQL 텍스트 → 구조화된 명령"]
     PARSE --> EXEC["Executor<br/>값 검증"]
     EXEC --> KIND{"명령 종류"}
-    KIND -->|INSERT| INSERT["자동 ID 부여<br/>레코드 한 건 추가"]
+    KIND -->|INSERT| INSERT["자동 ID 부여<br/>레코드 1~1,000건 추가"]
     KIND -->|SELECT| SELECT["레코드를 순서대로 읽기<br/>조건이 있으면 일치 여부 검사"]
     INSERT --> FILE[("users.tsv<br/>디스크에 남는 데이터")]
     FILE --> SELECT
-    INSERT --> OK["터미널: INSERT 1"]
+    INSERT --> OK["터미널: INSERT N"]
     SELECT --> RESULT["터미널: 헤더 + 조회 결과"]
     classDef input fill:#dbeafe,stroke:#2563eb,color:#172554;
     classDef process fill:#e0e7ff,stroke:#6366f1,color:#1e1b4b;
@@ -45,16 +47,17 @@ miniDBMS --data-dir ./data ./examples/basic.sql
 |---|---|
 | 입력 | UTF-8 SQL 파일 하나. 세미콜론으로 구분된 여러 문장을 순서대로 실행 |
 | 테이블 | users 하나. id: 양의 64비트 정수, name: 문자열, age: 0~150 정수 |
-| INSERT | name, age 컬럼을 각각 한 번 명시. 순서 변경 허용. 한 문장에 한 레코드 |
+| INSERT | name, age 컬럼을 각각 한 번 명시. 순서 변경 허용. 한 문장에 1~1,000개 레코드(`VALUES (...), (...)`, Phase 3 추가) |
 | ID | 사용자 입력 금지. 1부터 자동 부여. 재실행 시 기존 최대 ID 다음부터 시작 |
 | SELECT | 전체 컬럼 조회. 선택적으로 id 또는 age에 정수 동등 조건 하나 |
-| 결과 | INSERT는 `INSERT 1`, SELECT는 아래 TSV 형식. 결과 없음은 헤더만 출력 |
+| 결과 | INSERT는 `INSERT N`(N은 기록한 행 수, 한 행이면 `INSERT 1`), SELECT는 아래 TSV 형식. 결과 없음은 헤더만 출력 |
 | 오류 | stderr에 문장 번호와 원인. 즉시 종료. 성공 종료 코드 0, 실패는 0 이외 |
 | 저장 | 첫 실행은 빈 테이블로 시작. 정상 종료 후 재실행해도 데이터 유지 |
 
 ```sql
 INSERT INTO users (name, age) VALUES ('민수', 25);
 INSERT INTO users (age, name) VALUES (30, 'O''Brien');
+INSERT INTO users (name, age) VALUES ('지영', 41), ('현우', 30);  -- INSERT 2
 SELECT * FROM users;
 SELECT * FROM users WHERE id = 1;
 SELECT * FROM users WHERE age = 30;
@@ -66,6 +69,8 @@ SELECT * FROM users WHERE age = 30;
 id	name	age
 1	민수	25
 2	O'Brien	30
+3	지영	41
+4	현우	30
 ```
 
 ## SQL 지원 경계
@@ -79,6 +84,7 @@ id	name	age
 - 조회 순서는 삽입 순서. Phase 1의 모든 조건 검색은 선형 탐색한다. 일치하는 행을 찾은 뒤에도 파일 끝까지 읽으므로 뒤쪽 레코드 손상도 오류로 보고한다.
 - WHERE는 `id = 정수` 또는 `age = 정수` 하나. 컬럼 이름은 대소문자 무시, 비교값은 64비트 정수 범위면 받는다. 0 이하의 id, 0~150 밖의 age처럼 저장될 수 없는 값은 오류가 아니라 일치 없음(헤더만 출력)이다. 64비트 범위 초과, 문자열·NULL 값, `=` 외 비교(`<`, `>=`, `<>`, `!=` 등), name 조건, AND/OR는 오류다.
 - INSERT 문장 검증이 끝난 뒤 기록한다. 뒤 문장 실패 시 앞서 성공한 INSERT는 유지한다.
+- 여러 행 INSERT: 컬럼 목록은 한 번 쓰고 모든 행에 같은 순서로 적용한다. 끝 쉼표는 오류다. 모든 행을 검증한 뒤 기록하므로 값 오류가 한 행이라도 있으면 아무것도 기록하지 않는다. 두 번째 행부터의 오류 메시지에는 `N번째 행:`이 붙는다. 쓰는 도중 저장에 실패하면 앞의 행은 기록된 채 남고, 메시지 앞에 `앞의 k행은 기록됨:`을 붙인다. 한 문장의 행이 1,000개를 넘으면 문법 오류다.
 - 저장 파일 손상·읽기·쓰기·닫기 실패는 오류로 보고한다. I/O 실패 시 원자적 복구는 보장하지 않는다.
 
 ## 제외

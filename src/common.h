@@ -7,7 +7,7 @@ typedef struct {
     char msg[256];
 } DbError;
 
-/* err가 NULL이면 아무것도 하지 않는다. 메시지가 길면 잘린다. */
+/* err가 NULL이면 아무것도 하지 않는다. 메시지가 길면 잘리며, 끝의 미완성 UTF-8 문자는 지운다. */
 void db_error_set(DbError *err, const char *fmt, ...)
 #if defined(__GNUC__)
     __attribute__((format(printf, 2, 3)))

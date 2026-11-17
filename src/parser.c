@@ -10,7 +10,7 @@
  * 구조: Lexer(next_token)가 SQL 텍스트를 토큰으로 자르고,
  * 재귀 하강 파서(parse_insert / parse_select)가 토큰 순서를 문법과 맞춰 본다.
  *
- * INSERT INTO users ( 컬럼 [, 컬럼] ) VALUES ( 값 [, 값] ) ;
+ * INSERT INTO users ( 컬럼 [, 컬럼] ) VALUES ( 값 [, 값] ) [, ( 값 [, 값] )]* ;
  * SELECT * FROM users [ WHERE id|age = 정수 ] ;
  */
 
@@ -394,7 +394,8 @@ static int parse_columns(Parser *p, int cols[COL_COUNT], size_t *ncols) {
     return advance(p); /* ')' 소비 */
 }
 
-static int parse_values(Parser *p, const int cols[COL_COUNT], size_t ncols, Statement *out) {
+/* 값 묶음 ( 값 [, 값] ) 하나를 row에 채운다. 실패하면 row->name은 호출자가 해제한다. */
+static int parse_row(Parser *p, const int cols[COL_COUNT], size_t ncols, InsertRow *row) {
     size_t nvals = 0;
 
     if (expect(p, TOK_LPAREN, "여는 괄호 '('") != 0) {
@@ -405,21 +406,21 @@ static int parse_values(Parser *p, const int cols[COL_COUNT], size_t ncols, Stat
             db_error_set(p->err, "값이 컬럼보다 많습니다 (컬럼 %u개)", (unsigned)ncols);
             return -1;
         }
-        if (cols[nvals] == COL_NAME) { /* 문자열을 읽어서 out->name에 저장 */
+        if (cols[nvals] == COL_NAME) { /* 문자열을 읽어서 row->name에 저장 */
             if (p->cur.kind != TOK_STRING) {
                 db_error_set(p->err, "name에는 작은따옴표로 감싼 문자열 값이 필요합니다");
                 return -1;
             }
-            out->name = decode_string(&p->cur, p->err);
-            if (out->name == NULL) {
+            row->name = decode_string(&p->cur, p->err);
+            if (row->name == NULL) {
                 return -1;
             }
-        } else { /* 정수를 읽어서 out->age에 저장 */
+        } else { /* 정수를 읽어서 row->age에 저장 */
             if (p->cur.kind != TOK_INT) {
                 db_error_set(p->err, "age에는 정수 값이 필요합니다");
                 return -1;
             }
-            if (parse_int_value(p, &out->age) != 0) {
+            if (parse_int_value(p, &row->age) != 0) {
                 return -1;
             }
         }
@@ -444,6 +445,63 @@ static int parse_values(Parser *p, const int cols[COL_COUNT], size_t ncols, Stat
         return -1;
     }
     return advance(p); /* ')' 소비 */
+}
+
+/* 두 번째 행부터는 오류 메시지 앞에 행 번호를 붙인다. 한 행 문장의 메시지는 그대로다. */
+static void prefix_row_number(Parser *p, size_t row_no) {
+    char msg[sizeof p->err->msg];
+
+    if (p->err == NULL || row_no < 2) {
+        return;
+    }
+    memcpy(msg, p->err->msg, sizeof msg);
+    db_error_set(p->err, "%u번째 행: %s", (unsigned)row_no, msg);
+}
+
+/* 완성된 행을 out에 붙인다. 실패하면 row는 호출자가 해제한다. */
+static int push_row(Statement *out, size_t *cap, InsertRow row, DbError *err) {
+    if (out->row_count == *cap) {
+        size_t next = *cap == 0 ? 4 : *cap * 2;
+        InsertRow *grown = realloc(out->rows, next * sizeof *grown);
+        if (grown == NULL) {
+            db_error_set(err, "메모리가 부족합니다");
+            return -1;
+        }
+        out->rows = grown;
+        *cap = next;
+    }
+    out->rows[out->row_count++] = row;
+    return 0;
+}
+
+/* VALUES ( ... ) [, ( ... )]* : 모든 행에 같은 컬럼 순서를 적용한다. */
+static int parse_values(Parser *p, const int cols[COL_COUNT], size_t ncols, Statement *out) {
+    size_t cap = 0;
+
+    for (;;) {
+        InsertRow row = {NULL, 0};
+
+        if (parse_row(p, cols, ncols, &row) != 0) {
+            free(row.name);
+            prefix_row_number(p, out->row_count + 1);
+            return -1;
+        }
+        if (push_row(out, &cap, row, p->err) != 0) {
+            free(row.name);
+            return -1;
+        }
+        if (p->cur.kind != TOK_COMMA) {
+            return 0;
+        }
+        if (out->row_count >= INSERT_MAX_ROWS) {
+            db_error_set(p->err, "INSERT 한 문장의 행은 최대 %d개입니다", INSERT_MAX_ROWS);
+            return -1;
+        }
+        if (advance(p) != 0) { /* ',' 소비. 다음 행 첫 토큰의 lexer 오류 */
+            prefix_row_number(p, out->row_count + 1);
+            return -1;
+        }
+    }
 }
 
 static int parse_insert(Parser *p, Statement *out) {
@@ -546,8 +604,8 @@ int parser_next(const char *sql, size_t *pos, Statement *out, DbError *err) {
     int rc;
 
     out->kind = STMT_SELECT;
-    out->name = NULL;
-    out->age = 0;
+    out->rows = NULL;
+    out->row_count = 0;
     out->where = WHERE_NONE;
     out->where_value = 0;
 
@@ -581,6 +639,10 @@ void statement_free(Statement *st) {
     if (st == NULL) {
         return;
     }
-    free(st->name);
-    st->name = NULL;
+    for (size_t i = 0; i < st->row_count; i++) {
+        free(st->rows[i].name);
+    }
+    free(st->rows);
+    st->rows = NULL;
+    st->row_count = 0;
 }

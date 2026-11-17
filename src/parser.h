@@ -13,10 +13,19 @@ typedef enum { STMT_INSERT, STMT_SELECT } StmtKind;
 /* SELECT의 WHERE 조건: 없음, id = 값, age = 값 */
 typedef enum { WHERE_NONE, WHERE_ID, WHERE_AGE } WhereKind;
 
+/* INSERT 한 문장에 넣을 수 있는 최대 행 수. 묶음 전체가 쓰기 잠금 안에서 실행되므로
+ * 한 문장이 잠금을 너무 오래 잡지 않도록 제한한다. */
+#define INSERT_MAX_ROWS 1000
+
+typedef struct {
+    char *name; /* 따옴표를 풀어낸 문자열. Statement가 소유(malloc) */
+    int age;
+} InsertRow;
+
 typedef struct {
     StmtKind kind;
-    char *name;          /* INSERT: 따옴표를 풀어낸 문자열. Statement가 소유(malloc) */
-    int age;             /* INSERT */
+    InsertRow *rows;     /* INSERT: row_count개. Statement가 소유(malloc) */
+    size_t row_count;    /* INSERT: 1 이상. 파싱 도중 실패하면 name까지 채운 행 수 */
     WhereKind where;     /* SELECT */
     int64_t where_value; /* SELECT: where가 WHERE_NONE이 아닐 때 비교할 값 */
 } Statement;

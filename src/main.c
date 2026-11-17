@@ -100,10 +100,11 @@ static char *read_sql_file(const char *path, size_t *out_len, DbError *err) {
     return buf;
 }
 
-static int print_insert(int64_t id, void *ctx) {
+/* 행마다 개수만 센다. 문장이 성공하면 main이 "INSERT N"을 한 번 출력한다. */
+static int count_insert(int64_t id, void *ctx) {
     (void)id;
-    (void)ctx;
-    return printf("INSERT 1\n") < 0 ? -1 : 0;
+    (*(size_t *)ctx)++;
+    return 0;
 }
 
 static int print_row(const Row *row, void *ctx) {
@@ -128,7 +129,8 @@ int main(int argc, char **argv) {
     size_t sql_len = 0;
     size_t pos = 0;
     Table *table = NULL;
-    ResultSink sink = {print_insert, print_row, NULL};
+    size_t inserted = 0;
+    ResultSink sink = {count_insert, print_row, &inserted};
     long stmt_no = 0;
     int status = 0;
     int i;
@@ -203,7 +205,14 @@ int main(int argc, char **argv) {
             rc = -1;
         }
         if (rc == 0) {
+            inserted = 0;
             rc = executor_run(table, &st, &sink, &err);
+        }
+        /* MinGW의 printf가 %zu를 지원하지 않을 수 있어 unsigned long으로 출력한다. */
+        if (rc == 0 && st.kind == STMT_INSERT &&
+            printf("INSERT %lu\n", (unsigned long)inserted) < 0) {
+            db_error_set(&err, "결과 출력에 실패했습니다");
+            rc = -1;
         }
         statement_free(&st);
         if (rc != 0) {
