@@ -2,6 +2,7 @@
 #include "concurrency_support.hpp"
 #include "benchmarks/fair_gate.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <iostream>
 #include <shared_mutex>
@@ -157,11 +158,45 @@ void fair_writer_does_not_pass_waiting_readers() {
     threads.finish();
 }
 
+// Writers are woken one at a time (notify_one). Many concurrent writers and
+// readers must all finish (no lost wakeup) and never overlap a writer.
+void many_writers_and_readers_finish() {
+    WriterPreferredGate gate;
+    std::atomic<int> inside_writers{0}, inside_readers{0}, violations{0};
+    std::atomic<long> writes{0};
+    constexpr int threads_per_kind = 8, rounds = 2000;
+    std::vector<std::thread> threads;
+    for (int t = 0; t < threads_per_kind; ++t) {
+        threads.emplace_back([&] {
+            for (int i = 0; i < rounds; ++i) {
+                std::unique_lock<WriterPreferredGate> lock(gate);
+                if (inside_writers.fetch_add(1) != 0 || inside_readers.load() != 0) ++violations;
+                ++writes;
+                inside_writers.fetch_sub(1);
+            }
+        });
+        threads.emplace_back([&] {
+            for (int i = 0; i < rounds; ++i) {
+                std::shared_lock<WriterPreferredGate> lock(gate);
+                inside_readers.fetch_add(1);
+                if (inside_writers.load() != 0) ++violations;
+                inside_readers.fetch_sub(1);
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    require(violations.load() == 0, "a writer overlapped another writer or a reader");
+    require(writes.load() == threads_per_kind * rounds, "writes were lost");
+    const auto state = GateTestAccess::snapshot(gate);
+    require(state.readers == 0 && state.waiting_writers == 0 && !state.writer, "gate did not return to idle");
+}
+
 int main() {
     try {
         writer_before_later_reader();
         writer_waits_for_all_readers();
-        std::cout << "Gate: 2 deterministic scenarios passed\n";
+        many_writers_and_readers_finish();
+        std::cout << "Gate: 3 scenarios passed\n";
         fair_reader_does_not_pass_waiting_writer();
         fair_writer_does_not_pass_waiting_readers();
         std::cout << "FairGate (benchmark candidate): 2 deterministic scenarios passed\n";

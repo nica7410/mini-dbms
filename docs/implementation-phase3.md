@@ -76,6 +76,10 @@ reader별 mutex는 같은 worker index를 잘못 중복 사용한 호출도 같�
 - SELECT는 reader mutex → 공유 gate 순서로 획득한 뒤 `executor_run_read`를 호출한다. 서로 다른 reader는 동시에 실행할 수 있다.
 - INSERT는 독점 gate만 획득한 뒤 `executor_run`을 호출한다. 실행 중인 SELECT가 끝난 뒤 시작하며, 쓰기 중에는 새 SELECT가 실행되지 않는다.
 - 기다리는 writer가 있으면 새 reader가 먼저 통과하지 않도록 한다. 이미 진행 중인 reader를 중단하지는 않는다.
+- reader와 writer는 서로 다른 condition variable에서 기다린다.
+  - gate가 풀릴 때 대기 writer가 있으면 writer 하나만 깨우고, 없으면 reader를 모두 깨운다.
+  - 이전에는 모든 대기 스레드를 깨웠다. 그 때문에 쓰기 비중이 높을 때 잠금 넘김 비용이 INSERT 실행 시간(약 15µs)의 수 배가 됐다.
+  - 이 방식으로 바꾼 뒤 쓰기 99%·worker 8에서 처리량이 약 2.5배, 배타 gate 대기가 270→57µs로 개선됐다([B5](phase3-benchmarks/20261116/minimal-report.md#b5-gate-깨우기-방식-개선--2026-11-17)).
 
 이 정책은 읽기와 쓰기를 동시에 진행하는 MVCC가 아니다. writer가 계속 들어올 때 reader의 기아가 없다는 보장이나, 요청 수락 순서와 완료 순서가 같다는 보장도 제공하지 않는다.
 
@@ -241,5 +245,7 @@ LeakSanitizer는 실행 환경의 ptrace 제약 때문에 실행할 수 없어 �
   - 그래서 도착 순서(티켓) gate 후보를 벤치마크 전용 빌드로 비교했다.
   - 후보는 읽기 p99를 4.4ms로 줄였지만 처리량이 34% 줄고 쓰기 p99가 30% 늘었다.
   - 채택하지 않고 현재 쓰기 우선 정책을 유지한다.
+- **깨우기 개선(2026-11-17):** 쓰기 우선 정책은 그대로 두고, gate가 대기 writer 하나만 깨우도록 바꿨다. 같은 쓰기 99% 부하에서 처리량이 약 1.3만→3.3만 RPS, 읽기 p99가 약 130→20ms, 쓰기 p99가 3.3→1.7ms가 됐다. 스캔 부하는 변화가 없었다.
+- **비용 수치 갱신:** 위 RSS·시작 시간 증가는 인덱스 복제 구조의 측정값이다. 단일 인덱스 전환 뒤에는 worker 수와 무관하게 약 41MB, 0.1초다(B4).
 
 결과는 [최소 검증 결과](phase3-benchmarks/20261116/minimal-report.md)에 있다.
