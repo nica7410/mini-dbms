@@ -21,7 +21,9 @@ import tempfile
 import time
 
 
-SCENARIOS = ('old', 'new', 'missing', 'scan_write', 'write50', 'write90', 'write99')
+SCENARIOS = ('old', 'new', 'missing', 'scan_write', 'write50', 'write90', 'write99', 'bulk90')
+# Rows per INSERT statement in the bulk90 scenario.
+BULK_ROWS = 100
 
 
 def percentile(values, fraction):
@@ -132,8 +134,12 @@ async def load(port, scenario, rows, duration, concurrency, rate, seed, prefix, 
     submit_slots = asyncio.Semaphore(concurrency * 2)
 
     def action(number):
-        write_ratio = {'scan_write': .1, 'write50': .5, 'write90': .9, 'write99': .99}.get(scenario, 0)
+        write_ratio = {'scan_write': .1, 'write50': .5, 'write90': .9, 'write99': .99, 'bulk90': .9}.get(scenario, 0)
         if rng.random() < write_ratio:
+            if scenario == 'bulk90':
+                names = [f'{prefix}-{number}-{i}' for i in range(BULK_ROWS)]
+                values = ', '.join(f"('{name}', 31)" for name in names)
+                return 'write', f'INSERT INTO users (name, age) VALUES {values};', names
             name = f'{prefix}-{number}'
             return 'write', f"INSERT INTO users (name, age) VALUES ('{name}', 31);", name
         if scenario == 'scan_write':
@@ -159,9 +165,14 @@ async def load(port, scenario, rows, duration, concurrency, rate, seed, prefix, 
             code = 'OK' if status == 200 else body.get('error', {}).get('code', 'HTTP_ERROR')
             if status == 200:
                 if kind == 'write':
+                    names = expected if isinstance(expected, list) else [expected]
                     row_id = int(body.get('inserted_id', 0))
-                    valid = body.get('write_outcome') == 'applied' and row_id > rows*2+100 and row_id not in acknowledged
-                    acknowledged[row_id] = expected
+                    last_id = int(body.get('last_inserted_id', row_id))
+                    ids = range(row_id, last_id+1)
+                    valid = (body.get('write_outcome') == 'applied' and row_id > rows*2+100 and
+                             len(ids) == len(names) and not any(i in acknowledged for i in ids))
+                    for i, name in zip(ids, names):
+                        acknowledged[i] = name
                 else:
                     valid = body.get('rows') == ([] if expected is None else [expected])
                 if not valid:
