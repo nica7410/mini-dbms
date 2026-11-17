@@ -528,6 +528,25 @@ void test_multi_row_partial_write() {
 #endif
 }
 
+void test_insert_deadline_is_checked_after_the_gate() {
+    TempDirectory directory;
+    Engine engine(directory.options(2));
+    const auto past = Engine::Deadline::clock::now() - std::chrono::milliseconds(1);
+    auto expired = engine.execute(1, "INSERT INTO users (name, age) VALUES ('late', 1), ('later', 2);", past);
+    require(expired.status == QueryStatus::Expired && expired.is_insert && !expired.committed &&
+            expired.inserted_count == 0, "an expired INSERT was not reported as expired");
+    require(engine.stats().lock_wait[static_cast<std::size_t>(minidb::LockKind::WriteGate)].count == 1,
+            "expiry was not checked after acquiring the write gate");
+    auto scan = engine.execute(0, "SELECT * FROM users;", past);
+    require(scan.status == QueryStatus::Ok && scan.rows.empty(),
+            "an expired INSERT wrote rows or SELECT honored the deadline");
+    auto inserted = engine.execute(1, "INSERT INTO users (name, age) VALUES ('on-time', 3);",
+                                   Engine::Deadline::clock::now() + std::chrono::seconds(60));
+    require(inserted.status == QueryStatus::Ok && inserted.inserted_id == 1,
+            "an expired INSERT consumed an ID or a timely INSERT failed");
+    require(engine.healthy(), "expiry marked the engine unhealthy");
+}
+
 } // namespace
 
 int main() {
@@ -544,6 +563,7 @@ int main() {
         test_multi_row_insert_results();
         test_parallel_batches_are_contiguous();
         test_multi_row_partial_write();
+        test_insert_deadline_is_checked_after_the_gate();
         std::cout << "engine tests passed\n";
         return 0;
     } catch (const std::exception& error) {

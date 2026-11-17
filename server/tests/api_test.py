@@ -194,6 +194,12 @@ class ApiTest(unittest.TestCase):
                     self.assertLessEqual(detail["max_queue_wait_us"], detail["queue_wait_us"])
                     self.assertLessEqual(detail["queue_wait_us"], detail["total_us"])
                 self.assertEqual(sum(d["count"] for d in kinds.values()), metrics["pool"]["completed"])
+                # Classified by first keyword: the broken SELECT still went to the read queue.
+                pools = metrics["pools"]
+                self.assertEqual((pools["read"]["workers"], pools["write"]["workers"]), (4, 1))
+                self.assertEqual((pools["read"]["accepted"], pools["write"]["accepted"]), (3, 2))
+                for field in ("workers", "accepted", "completed", "queue_wait_us", "expired"):
+                    self.assertEqual(metrics["pool"][field], pools["read"][field] + pools["write"][field])
 
     def test_invalid_input_has_no_insert_side_effect(self):
         with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory, Server(directory) as server:

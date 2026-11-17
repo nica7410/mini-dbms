@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -16,7 +17,10 @@ enum class QueryStatus {
     ResultTooLarge,
     StorageError,
     Unavailable,
-    InternalError
+    InternalError,
+    // An INSERT whose deadline passed while it waited for the exclusive gate.
+    // Nothing was written.
+    Expired
 };
 
 struct OwnedRow {
@@ -85,10 +89,15 @@ public:
     Engine(Engine&&) = delete;
     Engine& operator=(Engine&&) = delete;
 
+    using Deadline = std::chrono::steady_clock::time_point;
+
     // Exactly one statement is accepted; trailing whitespace/comments are OK.
     // Each SQL worker should retain its own worker_index in [0, readers).
     // The engine must outlive all calls; drain/join workers before destruction.
-    QueryResult execute(std::size_t worker_index, const std::string& sql);
+    // An INSERT checks deadline once more after acquiring the exclusive gate and
+    // returns Expired without writing if it has passed. SELECT ignores it.
+    QueryResult execute(std::size_t worker_index, const std::string& sql,
+                        Deadline deadline = Deadline::max());
     bool healthy() const;
     // Atomic counters are read independently, so an in-flight snapshot can skew.
     EngineStats stats() const;

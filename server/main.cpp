@@ -1,8 +1,10 @@
+#include "c_api.hpp"
 #include "engine.hpp"
 #include "thread_pool.hpp"
 
 #include <drogon/drogon.h>
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -88,11 +90,52 @@ private:
     Slot slots_[static_cast<std::size_t>(RequestKind::Count)];
 };
 
+// Only the first keyword is read. A wrong guess costs scheduling, not results:
+// the worker parses the whole statement again and any worker can run any SQL.
+bool looks_like_insert(const std::string &sql) noexcept {
+    StmtKind kind = STMT_SELECT;
+    return parser_peek_kind(sql.c_str(), &kind) == 1 && kind == STMT_INSERT;
+}
+
+void write_pool_stats(Json::Value &out, const minidb::PoolStats &stats, std::uint64_t expired) {
+    out["workers"] = Json::UInt64(stats.workers);
+    out["queued"] = Json::UInt64(stats.queued);
+    out["queued_bytes"] = Json::UInt64(stats.queued_bytes);
+    out["active"] = Json::UInt64(stats.active);
+    out["peak_active"] = Json::UInt64(stats.peak_active);
+    out["accepted"] = Json::UInt64(stats.accepted);
+    out["completed"] = Json::UInt64(stats.completed);
+    out["rejected"] = Json::UInt64(stats.rejected);
+    out["failed_tasks"] = Json::UInt64(stats.failed_tasks);
+    out["queue_wait_us"] = Json::UInt64(stats.queue_wait_us);
+    out["max_queue_wait_us"] = Json::UInt64(stats.max_queue_wait_us);
+    out["expired"] = Json::UInt64(expired);
+}
+
+// The two queues summed. peak_active is the sum of each pool's own peak.
+minidb::PoolStats combine(const minidb::PoolStats &a, const minidb::PoolStats &b) {
+    minidb::PoolStats out;
+    out.workers = a.workers + b.workers;
+    out.queued = a.queued + b.queued;
+    out.queued_bytes = a.queued_bytes + b.queued_bytes;
+    out.active = a.active + b.active;
+    out.peak_active = a.peak_active + b.peak_active;
+    out.accepted = a.accepted + b.accepted;
+    out.completed = a.completed + b.completed;
+    out.rejected = a.rejected + b.rejected;
+    out.failed_tasks = a.failed_tasks + b.failed_tasks;
+    out.queue_wait_us = a.queue_wait_us + b.queue_wait_us;
+    out.max_queue_wait_us = std::max(a.max_queue_wait_us, b.max_queue_wait_us);
+    out.stopped = a.stopped && b.stopped;
+    return out;
+}
+
 struct Options {
     std::string data_dir = "data";
     std::string host = "127.0.0.1";
     std::size_t port = 8080;
     std::size_t workers = 4;
+    std::size_t write_workers = 1;
     std::size_t io_threads = 2;
     std::size_t queue_capacity = 256;
     std::size_t queue_bytes = 16 * 1024 * 1024;
@@ -110,14 +153,16 @@ void usage() {
         << "  --data-dir PATH          Database directory (data)\n"
         << "  --host ADDRESS          Listen address (127.0.0.1)\n"
         << "  --port N                TCP port (8080)\n"
-        << "  --workers N             SQL workers/read contexts (4)\n"
+        << "  --workers N             Read SQL workers (4)\n"
+        << "  --write-workers N       INSERT workers (1)\n"
         << "  --io-threads N          HTTP event loops (2)\n"
-        << "  --queue-capacity N      Maximum waiting SQL tasks (256)\n"
-        << "  --queue-bytes N         Maximum waiting request bytes (16777216)\n"
+        << "  --queue-capacity N      Maximum waiting SQL tasks, per queue (256)\n"
+        << "  --queue-bytes N         Maximum waiting request bytes, per queue (16777216)\n"
         << "  --max-sql-bytes N       SQL UTF-8 byte limit (65536)\n"
         << "  --max-rows N            SELECT result row limit (10000)\n"
         << "  --max-result-bytes N    JSON result byte limit, >= 512 (8388608)\n"
-        << "  --queue-timeout-ms N    Expiry before SQL execution (5000)\n"
+        << "  --queue-timeout-ms N    Expiry before SQL execution; INSERT also checks\n"
+        << "                          after waiting for the write lock (5000)\n"
         << "  --max-connections N     HTTP connection limit (1024)\n"
         << "  --help                  Show this message\n";
 }
@@ -141,6 +186,7 @@ Options parse_options(int argc, char **argv) {
         else if (key == "--host") out.host = value;
         else if (key == "--port") out.port = positive_number(value);
         else if (key == "--workers") out.workers = positive_number(value);
+        else if (key == "--write-workers") out.write_workers = positive_number(value);
         else if (key == "--io-threads") out.io_threads = positive_number(value);
         else if (key == "--queue-capacity") out.queue_capacity = positive_number(value);
         else if (key == "--queue-bytes") out.queue_bytes = positive_number(value);
@@ -151,10 +197,10 @@ Options parse_options(int argc, char **argv) {
         else if (key == "--max-connections") out.max_connections = positive_number(value);
         else throw std::invalid_argument("unknown option: " + key);
     }
-    if (out.port > 65535 || out.workers > 256 || out.io_threads > 256 ||
+    if (out.port > 65535 || out.workers > 256 || out.write_workers > 256 || out.io_threads > 256 ||
         out.max_sql_bytes > 16 * 1024 * 1024 || out.max_result_bytes < 512 ||
         out.queue_timeout_ms > 86400000 || out.data_dir.empty() || out.host.empty()) {
-        throw std::invalid_argument("option out of range (see --help; workers/io-threads <= 256, SQL <= 16 MiB)");
+        throw std::invalid_argument("option out of range (see --help; workers/write-workers/io-threads <= 256, SQL <= 16 MiB)");
     }
     return out;
 }
@@ -352,15 +398,20 @@ int serve(const Options &options) {
     DataDirectoryLock database_lock(options.data_dir);
     minidb::EngineOptions engine_options;
     engine_options.data_dir = options.data_dir;
-    engine_options.readers = options.workers;
+    // Write workers get reader handles too, so a misclassified SELECT still runs.
+    engine_options.readers = options.workers + options.write_workers;
     engine_options.max_sql_bytes = options.max_sql_bytes;
     engine_options.max_rows = options.max_rows;
     engine_options.max_result_bytes = options.max_result_bytes;
     minidb::Engine engine(engine_options);
-    minidb::ThreadPool pool(options.workers, options.queue_capacity, options.queue_bytes);
+    // INSERT and SELECT wait in separate queues so neither waits behind the other's
+    // backlog. Write workers take engine worker indices after the read workers.
+    minidb::ThreadPool read_pool(options.workers, options.queue_capacity, options.queue_bytes);
+    minidb::ThreadPool write_pool(options.write_workers, options.queue_capacity, options.queue_bytes);
     std::atomic<bool> stopping{false};
     std::atomic<std::uint64_t> next_request{1};
-    std::atomic<std::uint64_t> expired{0};
+    std::atomic<std::uint64_t> read_expired{0};
+    std::atomic<std::uint64_t> write_expired{0};
     RequestKindMetrics kinds;
     auto &app = drogon::app();
     // Account for worst-case JSON escaping of an otherwise valid SQL string.
@@ -405,11 +456,18 @@ int serve(const Options &options) {
                 callback(error_response(400, id, "INVALID_REQUEST", "SQL must be valid UTF-8"));
                 return;
             }
+            const bool write = looks_like_insert(sql);
+            auto &pool = write ? write_pool : read_pool;
+            auto *expired = write ? &write_expired : &read_expired;
+            const std::size_t first_worker = write ? options.workers : 0;
             const auto queued_at = Clock::now();
+            const auto deadline = queued_at + std::chrono::milliseconds(options.queue_timeout_ms);
+            const auto bytes = request->getBody().size();
             // Keep a separate callback copy for admission failures. Accepted tasks
             // own the SQL and callback; no request-local references enter the queue.
             const auto submitted = pool.try_submit(
-                [&, sql = std::move(sql), id, queued_at, done = callback](std::size_t worker) {
+                [&, sql = std::move(sql), id, queued_at, deadline, expired, first_worker,
+                 done = callback](std::size_t worker) {
                     const char *outcome_on_throw = "unknown";
                     // Copied as plain integers so the exception path can still report
                     // which rows were stored without touching the QueryResult.
@@ -420,11 +478,14 @@ int serve(const Options &options) {
                     auto kind = RequestKind::Other;
                     const auto started_at = Clock::now();
                     try {
-                        if (started_at - queued_at > std::chrono::milliseconds(options.queue_timeout_ms)) {
-                            expired.fetch_add(1, std::memory_order_relaxed);
+                        auto result = started_at > deadline ? minidb::QueryResult{}
+                                                            : engine.execute(first_worker + worker, sql, deadline);
+                        if (started_at > deadline || result.status == minidb::QueryStatus::Expired) {
+                            // Expired in the queue, or (INSERT) while waiting for the
+                            // write lock. Either way nothing was written.
+                            expired->fetch_add(1, std::memory_order_relaxed);
                             response = error_response(503, id, "QUEUE_TIMEOUT", "Task expired before SQL execution", "not_started");
                         } else {
-                            auto result = engine.execute(worker, sql);
                             if (result.is_insert) kind = RequestKind::Insert;
                             else if (result.status != minidb::QueryStatus::InvalidSql) kind = RequestKind::Select;
                             if (result.committed) {
@@ -447,7 +508,7 @@ int serve(const Options &options) {
                     // Drogon hands the response back to the connection's I/O loop.
                     // Transmission failure never rolls back an already applied INSERT.
                     done(response);
-                }, request->getBody().size());
+                }, bytes);
             if (submitted != minidb::ThreadPool::SubmitResult::Accepted) {
                 callback(error_response(503, id,
                     submitted == minidb::ThreadPool::SubmitResult::Full ? "QUEUE_FULL" : "SHUTTING_DOWN",
@@ -467,22 +528,16 @@ int serve(const Options &options) {
     }, {drogon::Get});
 
     app.registerHandler("/metrics", [&](const drogon::HttpRequestPtr &, Callback &&callback) {
-        const auto workers = pool.stats();
+        const auto reads = read_pool.stats();
+        const auto writes = write_pool.stats();
+        const auto read_expiries = read_expired.load(std::memory_order_relaxed);
+        const auto write_expiries = write_expired.load(std::memory_order_relaxed);
         const auto database = engine.stats();
         Json::Value result(Json::objectValue);
-        auto &queue = result["pool"];
-        queue["workers"] = Json::UInt64(workers.workers);
-        queue["queued"] = Json::UInt64(workers.queued);
-        queue["queued_bytes"] = Json::UInt64(workers.queued_bytes);
-        queue["active"] = Json::UInt64(workers.active);
-        queue["peak_active"] = Json::UInt64(workers.peak_active);
-        queue["accepted"] = Json::UInt64(workers.accepted);
-        queue["completed"] = Json::UInt64(workers.completed);
-        queue["rejected"] = Json::UInt64(workers.rejected);
-        queue["failed_tasks"] = Json::UInt64(workers.failed_tasks);
-        queue["queue_wait_us"] = Json::UInt64(workers.queue_wait_us);
-        queue["max_queue_wait_us"] = Json::UInt64(workers.max_queue_wait_us);
-        queue["expired"] = Json::UInt64(expired.load(std::memory_order_relaxed));
+        // "pool" keeps its original fields as the sum of both queues.
+        write_pool_stats(result["pool"], combine(reads, writes), read_expiries + write_expiries);
+        write_pool_stats(result["pools"]["read"], reads, read_expiries);
+        write_pool_stats(result["pools"]["write"], writes, write_expiries);
         const char *kind_names[] = {"insert", "select", "other"};
         static_assert(sizeof kind_names / sizeof kind_names[0] == static_cast<std::size_t>(RequestKind::Count),
                       "every RequestKind needs a /metrics name");
@@ -524,15 +579,18 @@ int serve(const Options &options) {
             !stopping.exchange(true, std::memory_order_acq_rel)) {
             // This is the main loop, not a SQL worker or an HTTP I/O loop.
             // HTTP loops stay alive to deliver worker callbacks during the drain.
-            pool.shutdown();
+            read_pool.shutdown();
+            write_pool.shutdown();
             app.quit();
         }
     });
     std::cout << "Mini DBMS listening on " << options.host << ':' << options.port
-              << " with " << options.workers << " SQL workers\n" << std::flush;
+              << " with " << options.workers << " read and " << options.write_workers
+              << " write SQL workers\n" << std::flush;
     app.run();
     stopping.store(true, std::memory_order_release);
-    pool.shutdown();
+    read_pool.shutdown();
+    write_pool.shutdown();
     return 0;
 }
 } // namespace

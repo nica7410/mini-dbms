@@ -261,7 +261,8 @@ struct Engine::Impl {
         }
     }
 
-    void run(std::size_t worker_index, const std::string& sql, QueryResult& result) {
+    void run(std::size_t worker_index, const std::string& sql, Clock::time_point deadline,
+             QueryResult& result) {
         if (worker_index >= readers.size()) {
             fail(result, QueryStatus::InternalError, "invalid SQL worker index");
             return;
@@ -309,6 +310,11 @@ struct Engine::Impl {
             std::unique_lock<EngineGate> write_gate(gate);
             add_wait(wait_started, LockKind::WriteGate);
             if (!available(result)) return;
+            // The wait for the gate counts toward the task's expiry budget.
+            if (Clock::now() > deadline) {
+                fail(result, QueryStatus::Expired, "task expired before SQL execution");
+                return;
+            }
 
             const ResultSink sink{record_insert, nullptr, &result};
             const int rc = run_insert(statement, sink, error);
@@ -348,11 +354,11 @@ struct Engine::Impl {
         finish_select(rc, collector, error);
     }
 
-    QueryResult execute(std::size_t worker_index, const std::string& sql) {
+    QueryResult execute(std::size_t worker_index, const std::string& sql, Clock::time_point deadline) {
         metrics.requests.fetch_add(1, std::memory_order_relaxed);
         QueryResult result;
         try {
-            run(worker_index, sql, result);
+            run(worker_index, sql, deadline, result);
         } catch (const std::bad_alloc&) {
             fail(result, QueryStatus::InternalError, "out of memory");
         } catch (...) {
@@ -385,8 +391,8 @@ GateSnapshot EngineTestAccess::snapshot(Engine& engine) {
 Engine::Engine(const EngineOptions& options) : impl_(std::make_unique<Impl>(options)) {}
 Engine::~Engine() = default;
 
-QueryResult Engine::execute(std::size_t worker_index, const std::string& sql) {
-    return impl_->execute(worker_index, sql);
+QueryResult Engine::execute(std::size_t worker_index, const std::string& sql, Deadline deadline) {
+    return impl_->execute(worker_index, sql, deadline);
 }
 
 bool Engine::healthy() const {

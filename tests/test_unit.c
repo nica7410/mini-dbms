@@ -327,6 +327,30 @@ static void test_parse_next_statement_error_isolated(void) {
     CHECK(strstr(err.msg, "알 수 없는 문자") != NULL);
 }
 
+static void test_parse_peek_kind(void) {
+    StmtKind kind = STMT_SELECT;
+
+    CHECK(parser_peek_kind("INSERT INTO users (name, age) VALUES ('a', 1);", &kind) == 1);
+    CHECK(kind == STMT_INSERT);
+    CHECK(parser_peek_kind("  -- c\n /* x */ iNsErT broken", &kind) == 1);
+    CHECK(kind == STMT_INSERT);
+    CHECK(parser_peek_kind("\tselect * FROM users;", &kind) == 1);
+    CHECK(kind == STMT_SELECT);
+    kind = STMT_INSERT;
+    CHECK(parser_peek_kind("SELECT", &kind) == 1);
+    CHECK(kind == STMT_SELECT);
+
+    kind = STMT_INSERT;
+    CHECK(parser_peek_kind("", &kind) == 0);
+    CHECK(parser_peek_kind("   -- only a comment", &kind) == 0);
+    CHECK(parser_peek_kind("/* unclosed INSERT", &kind) == 0);
+    CHECK(parser_peek_kind("INSERTX INTO users", &kind) == 0);
+    CHECK(parser_peek_kind("UPDATE users SET age = 1;", &kind) == 0);
+    CHECK(parser_peek_kind("(INSERT", &kind) == 0);
+    CHECK(parser_peek_kind("인 INSERT", &kind) == 0);
+    CHECK(kind == STMT_INSERT); /* 0이면 *out을 바꾸지 않는다 */
+}
+
 static void test_parse_errors(void) {
     EXPECT_PARSE_ERROR("SELECT * FROM users", "세미콜론");
     EXPECT_PARSE_ERROR("INSERT INTO users (name, age) VALUES ('a', 1)", "세미콜론");
@@ -1203,6 +1227,7 @@ int main(int argc, char **argv) {
     test_parse_where_errors();
     test_parse_next_statement_error_isolated();
     test_parse_errors();
+    test_parse_peek_kind();
 
     test_storage_empty_then_append();
     test_storage_persist_and_restore_id();

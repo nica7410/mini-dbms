@@ -635,6 +635,26 @@ int parser_next(const char *sql, size_t *pos, Statement *out, DbError *err) {
     return 1;
 }
 
+int parser_peek_kind(const char *sql, StmtKind *out) {
+    Parser p;
+
+    p.sql = sql;
+    p.pos = 0;
+    p.err = NULL;
+    if (next_token(&p) != 0) {
+        return 0;
+    }
+    if (tok_is(&p.cur, "insert")) {
+        *out = STMT_INSERT;
+        return 1;
+    }
+    if (tok_is(&p.cur, "select")) {
+        *out = STMT_SELECT;
+        return 1;
+    }
+    return 0;
+}
+
 void statement_free(Statement *st) {
     if (st == NULL) {
         return;
