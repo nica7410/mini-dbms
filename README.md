@@ -107,7 +107,7 @@ INSERT/UPDATE/DELETE:           배타 gate → Table(쓰기 FILE*, 공유 B+ �
   - 100행 INSERT 과부하: 읽기 p99 약 25 → 1.8ms, SELECT의 `QUEUE_FULL` 0건
 - 알려진 한계:
   - 긴 스캔이 실행되는 동안 INSERT는 실행 중인 스캔이 끝날 때까지 기다린다(큐에 쌓인 스캔은 기다리지 않는다).
-  - INSERT는 `fflush`까지만 하며 `fsync`는 하지 않는다.
+  - INSERT는 `fflush`까지만 하며 `fsync`는 하지 않는다. UPDATE·DELETE는 임시 파일을 `fsync`한 뒤 원래 파일과 바꾼다.
 - 측정 과정과 채택·기각한 개선(공정 gate, 단일 인덱스 전환, 깨우기 방식, 읽기 잠금 제거)은 [측정 보고서](docs/phase3-benchmarks/20261116/minimal-report.md)에 있다.
 
 ### 문서

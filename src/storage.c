@@ -17,6 +17,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <direct.h>
+#include <io.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #define make_dir(path) _mkdir(path)
@@ -24,8 +25,10 @@
 #define file_tell _ftelli64
 #define getc_nolock _getc_nolock
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #define make_dir(path) mkdir((path), 0755)
 #define file_seek fseeko
 #define file_tell ftello
@@ -644,6 +647,59 @@ static int replace_file(const char *from, const char *to) {
 #endif
 }
 
+/* fflush한 파일의 내용을 디스크까지 내린다. */
+static int sync_file(FILE *fp) {
+#ifdef _WIN32
+    return _commit(_fileno(fp)); /* FlushFileBuffers */
+#else
+    return fsync(fileno(fp));
+#endif
+}
+
+/* path가 든 폴더를 동기화해 이름 바꾸기를 디스크에 남긴다.
+ * Windows는 MoveFileExA(MOVEFILE_WRITE_THROUGH)가 이동을 디스크에 기록한 뒤 돌아오므로 할 일이 없다.
+ * 폴더를 열 권한이 없거나(EACCES) 폴더 fsync를 지원하지 않는 파일 시스템(EINVAL·EBADF)이면
+ * 할 수 있는 것이 없으므로 성공으로 본다(PostgreSQL과 같은 규칙). */
+static int sync_parent_dir(const char *path) {
+#ifdef _WIN32
+    (void)path;
+    return 0;
+#else
+    const char *slash = strrchr(path, '/');
+    size_t len = slash == NULL ? 0 : (slash == path ? 1 : (size_t)(slash - path));
+    char *dir = malloc(len + 2);
+    int fd;
+    int rc;
+    int saved_errno;
+
+    if (dir == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (len == 0) {
+        strcpy(dir, ".");
+    } else {
+        memcpy(dir, path, len);
+        dir[len] = '\0';
+    }
+    fd = open(dir, O_RDONLY | O_DIRECTORY);
+    saved_errno = errno;
+    free(dir);
+    if (fd < 0) {
+        errno = saved_errno;
+        return saved_errno == EACCES ? 0 : -1;
+    }
+    rc = fsync(fd);
+    saved_errno = errno;
+    (void)close(fd);
+    if (rc != 0 && (saved_errno == EINVAL || saved_errno == EBADF)) {
+        rc = 0;
+    }
+    errno = saved_errno;
+    return rc;
+#endif
+}
+
 /* Table과 모든 reader의 파일을 path로 다시 연다. 하나라도 실패하면 Table을 쓸 수 없게 한다. */
 static bool reopen_files(Table *t) {
     bool ok = true;
@@ -684,10 +740,12 @@ static void close_files(Table *t) {
  *   1. 기존 파일을 처음부터 검증하며 읽고, 행마다 fn의 결정대로 임시 파일에 쓴다.
  *      새 인덱스도 같은 순서로 만든다(ID는 그대로라 계속 증가한다).
  *   2. 바뀐 행이 없으면 임시 파일을 지우고 끝낸다. 파일은 그대로다.
- *   3. 임시 파일을 flush·close한 뒤 열린 파일을 모두 닫고 원래 파일을 대체한다.
- *   4. 인덱스를 새 것으로 바꾸고 새 파일을 다시 연다.
- * 3의 대체 전까지 실패하면 원래 파일과 인덱스는 그대로다. 전원 장애 대비 fsync는 하지 않는다
- * (추가 쓰기와 같은 범위).
+ *   3. 임시 파일을 flush·fsync·close한 뒤 열린 파일을 모두 닫고 원래 파일을 대체한다.
+ *   4. 인덱스를 새 것으로 바꾸고 새 파일을 다시 연 뒤, 폴더를 fsync해 대체를 디스크에 남긴다.
+ * 3의 대체 전까지 실패하면 원래 파일과 인덱스는 그대로다. 대체는 내용이 디스크에 기록된 임시 파일로만
+ * 하므로, 전원 장애가 나도 파일은 대체 전 내용이나 대체 후 내용 중 하나다(빈 파일·일부만 남은 파일이
+ * 되지 않는다). 폴더 fsync가 실패하면 변경은 적용됐지만 장애 뒤 남을지 알 수 없으므로 Table을 막는다.
+ * INSERT의 추가 쓰기는 지금처럼 fsync하지 않는다.
  */
 int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *err) {
     RewriteState s;
@@ -751,6 +809,10 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
         db_error_set(err, "임시 파일 쓰기 실패: %s (%s)", tmp_path, strerror(errno));
         goto out;
     }
+    if (sync_file(s.out) != 0) {
+        db_error_set(err, "임시 파일을 디스크에 기록하지 못했습니다: %s (%s)", tmp_path, strerror(errno));
+        goto out;
+    }
     if (fclose(s.out) != 0) {
         s.out = NULL;
         db_error_set(err, "임시 파일 닫기 실패: %s (%s)", tmp_path, strerror(errno));
@@ -778,6 +840,11 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
     }
     if (!reopen_files(t)) {
         db_error_set(err, "변경한 데이터 파일을 다시 열지 못했습니다: %s (%s)", t->path, strerror(errno));
+        goto out;
+    }
+    if (sync_parent_dir(t->path) != 0) {
+        t->write_failed = true;
+        db_error_set(err, "데이터 파일 교체를 디스크에 기록하지 못했습니다: %s (%s)", t->path, strerror(errno));
         goto out;
     }
     rc = 0;

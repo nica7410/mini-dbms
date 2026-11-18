@@ -23,7 +23,7 @@
 | 7 | [다중 행 INSERT](07-multi-row-insert.md) (구현 완료) | `VALUES (...), (...)` 문법, 묶음 검증 후 기록, CLI `INSERT N`, HTTP 응답 필드 추가 | 6번 완료. `Statement` 구조체 변경으로 아래 공통 범위의 "C 엔진 보존"을 완화한다 |
 | 8 | [묶음 쓰기(group commit)](08-group-commit.md) (구현 완료) | 한 문장의 행을 한 번의 `fwrite` + `fflush`로 기록, 실패 시 파일 크기로 기록 행 수 계산, 전후 최소 측정 | 7번 완료. C 저장 API에 함수 추가, 서버·파서·응답 형식은 그대로 |
 | 9 | [읽기·쓰기 큐 분리](09-read-write-queues.md) (완료: 큐 두 개, 쓰기 worker 기본 2) | 문제 후보 P1~P4와 0단계 확인 측정, 분류·쓰기 worker·만료·용량·지표 설계 선택지 D1~D7, 단계별 작업 계획 | 8번 완료. 0단계 측정으로 문제를 확인한 뒤에만 구현한다. gate 정책은 바꾸지 않는다 |
-| 10 | [UPDATE·DELETE](10-update-delete.md) (구현 완료, 미커밋) | 문법, 임시 파일 재작성·교체, reader 재열기, CLI `UPDATE N`/`DELETE N`, HTTP `type: update/delete`·`affected_rows`, 지표 | 9번 완료. 아래 공통 범위의 "UPDATE/DELETE 제외"를 2026-11-18 사용자 지시로 해제한다 |
+| 10 | [UPDATE·DELETE](10-update-delete.md) (구현 완료) | 문법, 임시 파일 재작성·교체, reader 재열기, CLI `UPDATE N`/`DELETE N`, HTTP `type: update/delete`·`affected_rows`, 지표 | 9번 완료. 아래 공통 범위의 "UPDATE/DELETE 제외"를 2026-11-18 사용자 지시로 해제한다 |
 
 최초 요청에 따라 계획을 저장했고, 이후 사용자의 순차 진행 지시로 구현을 시작했다. 작업별 실행 기록은 각 문서에 남긴다. 커밋·푸시는 해당 시점의 사용자 지시에 따른다.
 

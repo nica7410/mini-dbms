@@ -41,7 +41,7 @@ DELETE FROM users [WHERE id|age = 정수];
 - 일치하는 행이 없으면 파일을 다시 쓰지 않는다.
 - Windows의 `rename`은 대상이 있으면 실패하므로 `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`을 쓴다. 열린 파일은 대체할 수 없으므로 교체 전에 Table과 모든 reader의 `FILE*`를 닫고, 교체 뒤 다시 연다. POSIX에서도 reader가 옛 inode를 계속 읽지 않도록 같은 절차를 따른다. 이를 위해 Table이 열린 reader 목록을 갖는다.
 - 비용은 O(행 수)이고, 서버에서는 그동안 배타 gate를 잡는다. 단, `WHERE id = N`은 먼저 ID 인덱스를 확인해 없으면 파일을 읽지 않고 0행으로 끝낸다([후속: ID 미스 생략](#후속-where-id-미스-시-파일-읽기-생략-2026-11-18)).
-- `fsync`는 하지 않는다(INSERT와 같은 범위).
+- 교체 전에 임시 파일을 `fsync`하고, 교체 뒤 폴더를 `fsync`한다([후속: 교체 fsync](#후속-파일-교체-fsync-2026-11-18)). INSERT는 `fsync`하지 않는다.
 
 ### ID 재사용
 
@@ -101,3 +101,19 @@ DELETE FROM users [WHERE id|age = 정수];
 - 동작 차이: 없는 ID에 대한 UPDATE·DELETE는 더 이상 파일 전체를 검증하지 않는다. 시작 뒤 외부에서 파일이 손상돼도 0행 성공을 돌려준다. `SELECT … WHERE id = N`과 같은 규칙이고, 파일 변경은 이 프로세스만 한다는 전제 안의 차이다.
 - 테스트: `test_modify_id_miss_skips_scan` — 연 뒤 파일 끝에 손상된 줄을 붙이고, 없는 ID의 UPDATE·DELETE는 0행 성공, 값 오류는 여전히 오류, 있는 ID와 `age` 조건은 손상 오류, 파일 불변을 확인한다.
 - 검증: 컨테이너(`mini-dbms-phase3-review:3b19667`)에서 `make test` — 경고 0건, 단위 34742개 검사 실패 0, CLI 33개 PASS. 서버 `ctest`·sanitizer·TSan은 다시 돌리지 않았다(서버 코드 변경 없음, 잠금 범위 동일).
+
+## 후속: 파일 교체 fsync (2026-11-18)
+
+사용자 지시: 다음 개선 후보 중 "1번 진행"(파일 교체 전에 디스크에 확실히 쓰기).
+
+- 문제: `fsync` 없이 `rename`하면 전원 장애 때 임시 파일 내용이 디스크에 닿기 전에 이름 바꾸기만 남아, `users.tsv`가 비거나 일부만 남을 수 있었다. 추가 쓰기만 있을 때는 끝의 몇 줄만 잃었지만, 교체는 테이블 전체를 잃을 수 있다.
+- 변경(`src/storage.c`):
+  - `sync_file`: 임시 파일을 `fflush` 뒤 `fsync`(Windows `_commit` = `FlushFileBuffers`). 실패하면 교체 전이므로 아무것도 바뀌지 않는다.
+  - `sync_parent_dir`: 교체·다시 열기 뒤 데이터 폴더를 `fsync`한다(POSIX). 폴더를 열 권한이 없거나(`EACCES`) 폴더 `fsync`를 지원하지 않으면(`EINVAL`·`EBADF`) 성공으로 본다(PostgreSQL과 같은 규칙). 그 밖의 실패는 변경이 적용된 채 `write_failed`로 Table을 막는다(`*changed > 0` 실패 계약 그대로). Windows는 `MOVEFILE_WRITE_THROUGH`가 이동을 디스크에 기록한 뒤 돌아오므로 하지 않는다.
+  - INSERT 경로와 `WHERE id` 미스 경로는 바꾸지 않았다.
+- 비용: UPDATE·DELETE마다 `fsync` 2회가 늘어난다(저장 장치에 따라 수 ms~수십 ms). 측정하지 않았다.
+- 검증:
+  - 컨테이너 `make test`: 경고 0건, 단위 34742개 검사 실패 0, CLI 33개 PASS.
+  - 호출 순서: `fsync`·`rename`을 가로채는 `LD_PRELOAD` 도구로 CLI 실행. UPDATE와 DELETE마다 `fsync users.tsv.tmp` → `rename` → `fsync <폴더>` 순서, INSERT와 없는 ID의 DELETE는 `fsync` 없음.
+  - Windows: MinGW-w64 `-static` 교차 빌드 경고 0건, 호스트에서 단위 34684개 검사 실패 0, CLI 33개 PASS.
+  - 미실행: `fsync` 실패 주입 테스트(실패 경로는 코드 검토만), 실제 전원 차단 시험, 서버 `ctest`·sanitizer·TSan(서버 코드·잠금 변경 없음).

@@ -222,8 +222,8 @@ HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한�
 - B+ 트리 인덱스는 하나를 모든 worker가 공유한다. 공유 gate 아래에서만 읽고, INSERT·UPDATE·DELETE의 배타 gate 아래에서만 바뀐다. 그래서 쓰기 직후 어느 worker에서 조회해도 결과가 바로 보인다.
 - 쓰기 문장은 직렬화하며, 실행 중에는 SELECT를 실행하지 않는다. UPDATE·DELETE는 파일을 바꾼 뒤 모든 worker의 읽기 핸들을 새 파일로 다시 연다(배타 gate 아래라 읽는 worker가 없다).
 - 인덱스는 시작할 때 한 번만 구축한다. worker 수를 늘려도 인덱스 메모리와 시작 시간은 늘지 않는다.
-- 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, UPDATE/DELETE, 페이지네이션은 제공하지 않는다.
-- TSV 쓰기는 기존 엔진의 `fflush` 계약을 사용한다. WAL·`fsync`·crash recovery를 추가한 것은 아니다.
+- 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, 페이지네이션은 제공하지 않는다.
+- INSERT는 기존 엔진의 `fflush` 계약을 사용한다. UPDATE·DELETE는 임시 파일과 폴더를 `fsync`해 파일 교체가 전원 장애 뒤에도 전부 또는 전무가 되게 한다. WAL·crash recovery를 추가한 것은 아니다.
 
 Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다. 긴 순차 탐색, 쓰기 비중과 저장 장치가 성능에 영향을 준다. `peak_active`는 worker 활동 수이고, `engine.peak_executions`는 C executor(`executor_run`, `executor_run_read`)의 동시 진입 수다. 어느 값도 단독으로 속도 향상을 증명하지 않는다.
 

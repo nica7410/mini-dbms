@@ -70,7 +70,9 @@ typedef int (*RewriteFn)(const Row *row, void *ctx, RowEdit *edit);
  * 실패: -1.
  *   *changed == 0: 파일과 인덱스는 그대로다. 파일을 다시 열지 못한 경우가 아니면 Table을
  *                  계속 쓸 수 있다(table_usable과 같은 규칙).
- *   *changed > 0 : 파일 교체는 끝났지만 다시 열지 못했다. 변경은 적용됐고 Table은 더 쓸 수 없다.
+ *   *changed > 0 : 파일 교체는 끝났지만 다시 열지 못했거나 교체를 디스크에 기록(폴더 fsync)하지
+ *                  못했다. 변경은 적용됐고 Table은 더 쓸 수 없다.
+ * 임시 파일은 fsync한 뒤에만 원래 파일을 대체하므로, 전원 장애 뒤 파일은 대체 전이나 후 중 하나다.
  * 부여한 최대 ID(다음 INSERT의 ID 기준)는 줄지 않는다. 단, 재시작하면 파일에 남은 최대 ID에서
  * 다시 계산하므로 끝쪽 ID를 지운 뒤 재시작하면 그 ID가 다시 쓰일 수 있다.
  * 열려 있는 TableReader의 파일도 새 파일로 다시 연다. 따라서 reader 조회·열기·닫기와 동시에
