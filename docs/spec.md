@@ -11,6 +11,8 @@
 
 2026-11-17 사용자 지시로 여러 행 INSERT(`VALUES (...), (...)`)를 추가했다. 한 행 문장의 동작과 출력은 그대로다. 근거와 범위는 [다중 행 INSERT 계획](plans/phase3-improvements/07-multi-row-insert.md)에 있다.
 
+2026-11-18 사용자 지시로 UPDATE와 DELETE를 추가했다. 아래 [UPDATE·DELETE](#updatedelete-phase-3-추가) 절과 [계획 10](plans/phase3-improvements/10-update-delete.md)에 있다. 기존 INSERT·SELECT 동작과 출력은 그대로다.
+
 ## 한눈에 보는 동작
 
 ```mermaid
@@ -87,9 +89,26 @@ id	name	age
 - 여러 행 INSERT: 컬럼 목록은 한 번 쓰고 모든 행에 같은 순서로 적용한다. 끝 쉼표는 오류다. 모든 행을 검증한 뒤 기록하므로 값 오류가 한 행이라도 있으면 아무것도 기록하지 않는다. 두 번째 행부터의 오류 메시지에는 `N번째 행:`이 붙는다. 쓰는 도중 저장에 실패하면 앞의 행은 기록된 채 남고, 메시지 앞에 `앞의 k행은 기록됨:`을 붙인다. 한 문장의 행이 1,000개를 넘으면 문법 오류다.
 - 저장 파일 손상·읽기·쓰기·닫기 실패는 오류로 보고한다. I/O 실패 시 원자적 복구는 보장하지 않는다.
 
+## UPDATE·DELETE (Phase 3 추가)
+
+```sql
+UPDATE users SET age = 26 WHERE id = 1;          -- UPDATE 1
+UPDATE users SET name = 'O''Brien', age = 31;     -- 조건 없음: 모든 행
+DELETE FROM users WHERE age = 30;                -- DELETE N
+DELETE FROM users;                               -- 모든 행
+```
+
+- SET은 `name`, `age`를 각각 한 번까지, 하나 이상 쓴다. 값 규칙은 INSERT와 같다. `id`는 바꿀 수 없다(오류).
+- WHERE는 SELECT와 같다. 생략하면 모든 행이다. 저장될 수 없는 비교값은 일치 없음(0행)이다.
+- 결과는 `UPDATE N` / `DELETE N`. N은 조건에 맞은 행 수다(값이 같아도 센다). 0행도 성공이다.
+- 값 오류는 아무것도 바꾸지 않는다. 문장 하나는 파일 전체를 임시 파일(`users.tsv.tmp`)에 다시 쓴 뒤 원래 파일과 바꾸므로, 교체 전에 실패하면 아무 행도 바뀌지 않는다. 일치하는 행이 없으면 파일을 다시 쓰지 않는다.
+- 행의 id와 저장 순서는 바뀌지 않는다. 지운 행은 SELECT·id 조회 모두에서 사라진다.
+- 같은 실행 안에서는 지운 최대 ID를 다시 쓰지 않는다. 재실행하면 기존 규칙대로 파일에 남은 최대 ID 다음부터 부여하므로, 끝쪽 ID를 지운 뒤 재실행하면 그 ID가 다시 쓰일 수 있다.
+- 비용은 조건과 관계없이 O(행 수)다. 전원 장애 대비 `fsync`는 하지 않는다.
+
 ## 제외
 
-CREATE TABLE, UPDATE, DELETE, NULL, 중첩 블록 주석, 컬럼 선택 조회, 복합 조건,
+CREATE TABLE, NULL, 중첩 블록 주석, 컬럼 선택 조회, 복합 조건,
 JOIN, 정렬, 트랜잭션, 동시 실행, B+ 트리, API, 비정상 종료·전원 장애 복구.
 
 ## 종료해도 데이터가 남는 이유

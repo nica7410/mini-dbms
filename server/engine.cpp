@@ -93,6 +93,8 @@ struct Metrics {
     std::atomic<std::uint64_t> requests{0};
     std::atomic<std::uint64_t> successful_inserts{0};
     std::atomic<std::uint64_t> successful_selects{0};
+    std::atomic<std::uint64_t> successful_updates{0};
+    std::atomic<std::uint64_t> successful_deletes{0};
     std::atomic<std::uint64_t> errors{0};
     std::atomic<std::uint64_t> current_executions{0};
     std::atomic<std::uint64_t> peak_executions{0};
@@ -135,6 +137,29 @@ bool valid_insert_row(const InsertRow& row) noexcept {
            row.age >= AGE_MIN && row.age <= AGE_MAX;
 }
 
+bool valid_name(const char* name) noexcept {
+    if (name == nullptr) return false;
+    const auto length = std::strlen(name);
+    return length > 0 && length <= NAME_MAX_BYTES && std::strpbrk(name, "\t\r\n") == nullptr;
+}
+
+bool valid_update_values(const Statement& statement) noexcept {
+    if (statement.set_name == nullptr && statement.has_set_age == 0) return false;
+    if (statement.set_name != nullptr && !valid_name(statement.set_name)) return false;
+    return statement.has_set_age == 0 ||
+           (statement.set_age >= AGE_MIN && statement.set_age <= AGE_MAX);
+}
+
+QueryKind query_kind(StmtKind kind) noexcept {
+    switch (kind) {
+        case STMT_SELECT: return QueryKind::Select;
+        case STMT_INSERT: return QueryKind::Insert;
+        case STMT_UPDATE: return QueryKind::Update;
+        case STMT_DELETE: return QueryKind::Delete;
+    }
+    return QueryKind::Unknown;
+}
+
 bool valid_insert_values(const Statement& statement) noexcept {
     if (statement.rows == nullptr || statement.row_count == 0 ||
         statement.row_count > INSERT_MAX_ROWS) {
@@ -155,6 +180,15 @@ static int record_insert(std::int64_t id, void* opaque) noexcept {
     result.last_inserted_id = id;
     ++result.inserted_count;
     result.committed = true;
+    return 0;
+}
+
+static int record_change(std::size_t affected, void* opaque) noexcept {
+    auto& result = *static_cast<QueryResult*>(opaque);
+    // Called once, after the rewritten file replaced the old one (or with 0 when
+    // nothing matched and the file was left alone). Must not fail.
+    result.affected_count = affected;
+    result.committed = affected > 0;
     return 0;
 }
 }
@@ -198,8 +232,9 @@ static int collect_row(const Row* row, void* opaque) noexcept {
 
 struct Engine::Impl {
     // A worker's own file cursor over the shared Table. The B+ tree index is
-    // shared: it is read only under the shared gate and changed only by INSERT
-    // under the exclusive gate.
+    // shared: it is read only under the shared gate and changed only by
+    // INSERT/UPDATE/DELETE under the exclusive gate. UPDATE/DELETE replace the
+    // file and reopen every reader's FILE*, which is safe for the same reason.
     struct Reader {
         explicit Reader(Table* shared) : handle(open_reader(shared)) {}
         ReaderHandle handle;
@@ -221,7 +256,7 @@ struct Engine::Impl {
         }
     }
 
-    int run_insert(const Statement& statement, const ResultSink& sink, DbError& error) {
+    int run_write(const Statement& statement, const ResultSink& sink, DbError& error) {
         ExecutionScope execution(metrics);
         return executor_run(table.get(), &statement, &sink, &error);
     }
@@ -297,11 +332,14 @@ struct Engine::Impl {
         }
 
         const auto& statement = parsed.statement;
-        result.is_insert = statement.kind == STMT_INSERT;
-        if (result.is_insert) {
+        result.kind = query_kind(statement.kind);
+        result.is_insert = result.kind == QueryKind::Insert;
+        if (result.kind != QueryKind::Select) {
             // Mirror the C executor's public schema rules only to classify a
             // client error; executor_run still performs its own validation.
-            if (!valid_insert_values(statement)) {
+            const bool valid = result.is_insert ? valid_insert_values(statement)
+                                                : statement.kind != STMT_UPDATE || valid_update_values(statement);
+            if (!valid) {
                 fail(result, QueryStatus::InvalidValues,
                      "name must contain 1-255 bytes without tabs/newlines; age must be 0-150");
                 return;
@@ -316,8 +354,8 @@ struct Engine::Impl {
                 return;
             }
 
-            const ResultSink sink{record_insert, nullptr, &result};
-            const int rc = run_insert(statement, sink, error);
+            const ResultSink sink{record_insert, nullptr, &result, record_change};
+            const int rc = run_write(statement, sink, error);
             if (rc == 0) {
                 result.status = QueryStatus::Ok;
                 return;
@@ -326,6 +364,8 @@ struct Engine::Impl {
             // All stored IDs are > 0. This public-API probe checks table_usable
             // first, then misses in the index without touching the FILE cursor.
             // It exposes write_failed, not general file health or commit status.
+            // An UPDATE/DELETE that failed before replacing the file leaves the
+            // Table usable; one that replaced it but could not reopen does not.
             DbError health_error{};
             if (table_find_id(table.get(), 0, nullptr, nullptr, &health_error) != 0) {
                 is_healthy.store(false, std::memory_order_release);
@@ -348,7 +388,7 @@ struct Engine::Impl {
         if (!available(result)) return;
 
         RowCollector collector{result, options};
-        const ResultSink sink{nullptr, collect_row, &collector};
+        const ResultSink sink{nullptr, collect_row, &collector, nullptr};
         // The shared index is always current, so a miss is final.
         const int rc = run_select(reader, statement, sink, error);
         finish_select(rc, collector, error);
@@ -365,8 +405,11 @@ struct Engine::Impl {
             fail(result, QueryStatus::InternalError, "engine failure");
         }
         if (result.status == QueryStatus::Ok) {
-            (result.is_insert ? metrics.successful_inserts : metrics.successful_selects)
-                .fetch_add(1, std::memory_order_relaxed);
+            auto* counter = &metrics.successful_selects;
+            if (result.kind == QueryKind::Insert) counter = &metrics.successful_inserts;
+            else if (result.kind == QueryKind::Update) counter = &metrics.successful_updates;
+            else if (result.kind == QueryKind::Delete) counter = &metrics.successful_deletes;
+            counter->fetch_add(1, std::memory_order_relaxed);
         } else {
             metrics.errors.fetch_add(1, std::memory_order_relaxed);
         }
@@ -405,6 +448,8 @@ EngineStats Engine::stats() const {
     out.requests = metrics.requests.load(std::memory_order_relaxed);
     out.successful_inserts = metrics.successful_inserts.load(std::memory_order_relaxed);
     out.successful_selects = metrics.successful_selects.load(std::memory_order_relaxed);
+    out.successful_updates = metrics.successful_updates.load(std::memory_order_relaxed);
+    out.successful_deletes = metrics.successful_deletes.load(std::memory_order_relaxed);
     out.errors = metrics.errors.load(std::memory_order_relaxed);
     out.current_executions = metrics.current_executions.load(std::memory_order_relaxed);
     out.peak_executions = metrics.peak_executions.load(std::memory_order_relaxed);

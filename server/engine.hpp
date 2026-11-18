@@ -18,10 +18,13 @@ enum class QueryStatus {
     StorageError,
     Unavailable,
     InternalError,
-    // An INSERT whose deadline passed while it waited for the exclusive gate.
-    // Nothing was written.
+    // A write (INSERT/UPDATE/DELETE) whose deadline passed while it waited for
+    // the exclusive gate. Nothing was written.
     Expired
 };
+
+// Statement kind once the SQL parsed; Unknown when it did not.
+enum class QueryKind { Unknown, Select, Insert, Update, Delete };
 
 struct OwnedRow {
     std::int64_t id;
@@ -31,16 +34,22 @@ struct OwnedRow {
 
 struct QueryResult {
     QueryStatus status = QueryStatus::InternalError;
-    bool is_insert = false;
-    // A later response/transport failure never rolls an INSERT back.
-    // True once at least one row of the INSERT was stored. With a multi-row
-    // INSERT and a storage failure this can be true while status is an error.
+    QueryKind kind = QueryKind::Unknown;
+    bool is_insert = false; // kind == QueryKind::Insert
+    // A later response/transport failure never rolls a write back.
+    // INSERT: true once at least one row was stored. With a multi-row INSERT and
+    // a storage failure this can be true while status is an error.
+    // UPDATE/DELETE: true once the rewritten file replaced the old one with at
+    // least one changed row. The whole statement applies at once, so this can be
+    // true with a StorageError only when reopening the new file failed.
     bool committed = false;
     // IDs within one INSERT statement are consecutive: the whole statement runs
     // under the exclusive gate. inserted_id is the first ID.
     std::int64_t inserted_id = 0;
     std::int64_t last_inserted_id = 0;
     std::size_t inserted_count = 0;
+    // UPDATE/DELETE: rows matched and changed (0 when nothing matched).
+    std::size_t affected_count = 0;
     std::vector<OwnedRow> rows;
     std::string error;
 };
@@ -69,8 +78,10 @@ struct EngineStats {
     std::uint64_t requests = 0;
     std::uint64_t successful_inserts = 0;
     std::uint64_t successful_selects = 0;
+    std::uint64_t successful_updates = 0;
+    std::uint64_t successful_deletes = 0;
     std::uint64_t errors = 0;
-    // These count C executor calls (INSERT and SELECT), excluding parsing and lock waiting.
+    // These count C executor calls (all statement kinds), excluding parsing and lock waiting.
     std::uint64_t current_executions = 0;
     std::uint64_t peak_executions = 0;
     std::uint64_t lock_wait_us = 0;
@@ -94,8 +105,9 @@ public:
     // Exactly one statement is accepted; trailing whitespace/comments are OK.
     // Each SQL worker should retain its own worker_index in [0, readers).
     // The engine must outlive all calls; drain/join workers before destruction.
-    // An INSERT checks deadline once more after acquiring the exclusive gate and
-    // returns Expired without writing if it has passed. SELECT ignores it.
+    // INSERT, UPDATE and DELETE check deadline once more after acquiring the
+    // exclusive gate and return Expired without writing if it has passed.
+    // SELECT ignores it. UPDATE/DELETE rewrite the whole table file (O(rows)).
     QueryResult execute(std::size_t worker_index, const std::string& sql,
                         Deadline deadline = Deadline::max());
     bool healthy() const;

@@ -9,7 +9,7 @@ C17로 구현한 SQL 엔진과 CLI(Phase 1·2), 그리고 그 엔진을 여러 �
 3. [작업 목록](docs/tasks.md): 구현 단위와 검증 기준
 4. [구현설명서](docs/implementation.md): 전체 흐름에서 INSERT·SELECT 코드 따라가기
 
-지원 SQL은 `INSERT INTO users (name, age) VALUES (...)[, (...)]`(한 문장 최대 1,000행), `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `--`·`/* */` 주석이다.
+지원 SQL은 `INSERT INTO users (name, age) VALUES (...)[, (...)]`(한 문장 최대 1,000행), `SELECT * FROM users [WHERE id = 정수 | WHERE age = 정수]`, `UPDATE users SET name|age = 값[, ...] [WHERE ...]`, `DELETE FROM users [WHERE ...]`(Phase 3 추가, [명세](docs/spec.md#updatedelete-phase-3-추가)), `--`·`/* */` 주석이다.
 
 ## 빌드와 실행 (Windows, TDM-GCC)
 
@@ -79,7 +79,7 @@ Windows 10 Pro, Intel Core i7-10875H, LLVM-MinGW Clang 23.1.5, `-O2`에서 측�
 
 ```
 SELECT: worker i → reader mutex → 공유 gate → TableReader[i](자기 FILE*) + 공유 B+ 트리
-INSERT:                         배타 gate → Table(쓰기 FILE*, 공유 B+ 트리 갱신)
+INSERT/UPDATE/DELETE:           배타 gate → Table(쓰기 FILE*, 공유 B+ 트리 갱신)
 ```
 
 - **B+ 트리는 하나를 모든 worker가 공유한다.** 공유 gate 아래에서만 읽고, INSERT의 배타 gate 아래에서만 바뀐다. 그래서 INSERT 직후 어느 worker에서 조회해도 새 행이 바로 보인다.

@@ -107,6 +107,12 @@ static int count_insert(int64_t id, void *ctx) {
     return 0;
 }
 
+/* UPDATE·DELETE가 바꾼 행 수. 문장이 성공하면 main이 "UPDATE N" / "DELETE N"을 출력한다. */
+static int record_change(size_t affected, void *ctx) {
+    *(size_t *)ctx = affected;
+    return 0;
+}
+
 static int print_row(const Row *row, void *ctx) {
     (void)ctx;
     return printf("%" PRId64 "\t%s\t%d\n", row->id, row->name, row->age) < 0 ? -1 : 0;
@@ -129,8 +135,8 @@ int main(int argc, char **argv) {
     size_t sql_len = 0;
     size_t pos = 0;
     Table *table = NULL;
-    size_t inserted = 0;
-    ResultSink sink = {count_insert, print_row, &inserted};
+    size_t inserted = 0; /* INSERT·UPDATE·DELETE가 기록·변경한 행 수 */
+    ResultSink sink = {count_insert, print_row, &inserted, record_change};
     long stmt_no = 0;
     int status = 0;
     int i;
@@ -184,7 +190,7 @@ int main(int argc, char **argv) {
     }
 
     /* 문장을 순서대로 실행하고, 하나라도 실패하면 즉시 멈춘다(fail-fast).
-     * 앞서 성공한 INSERT는 이미 파일에 있으므로 유지된다. */
+     * 앞서 성공한 INSERT·UPDATE·DELETE는 이미 파일에 있으므로 유지된다. */
     for (;;) {
         Statement st;
         int r;
@@ -209,8 +215,10 @@ int main(int argc, char **argv) {
             rc = executor_run(table, &st, &sink, &err);
         }
         /* MinGW의 printf가 %zu를 지원하지 않을 수 있어 unsigned long으로 출력한다. */
-        if (rc == 0 && st.kind == STMT_INSERT &&
-            printf("INSERT %lu\n", (unsigned long)inserted) < 0) {
+        if (rc == 0 && st.kind != STMT_SELECT &&
+            printf("%s %lu\n",
+                   st.kind == STMT_INSERT ? "INSERT" : st.kind == STMT_UPDATE ? "UPDATE" : "DELETE",
+                   (unsigned long)inserted) < 0) {
             db_error_set(&err, "결과 출력에 실패했습니다");
             rc = -1;
         }

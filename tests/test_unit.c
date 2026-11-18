@@ -253,7 +253,7 @@ static void test_parse_comment_errors(void) {
     EXPECT_PARSE_ERROR("/* 닫히지 않음", "블록 주석");
     EXPECT_PARSE_ERROR("SELECT * FROM users /* 세미콜론이 주석 안; ", "블록 주석");
     /* 중첩 미지원: 안쪽 닫는 기호에서 주석이 끝나 남은 닫는 기호가 SQL로 읽힌다. */
-    EXPECT_PARSE_ERROR("/* a /* b */ */ SELECT * FROM users;", "INSERT 또는 SELECT");
+    EXPECT_PARSE_ERROR("/* a /* b */ */ SELECT * FROM users;", "UPDATE 또는 DELETE");
     EXPECT_PARSE_ERROR("SELECT * FROM users -- 세미콜론이 주석 안;", "세미콜론");
     EXPECT_PARSE_ERROR("SELECT * FROM users / 1;", "알 수 없는 문자 '/'");
 }
@@ -345,18 +345,24 @@ static void test_parse_peek_kind(void) {
     CHECK(parser_peek_kind("   -- only a comment", &kind) == 0);
     CHECK(parser_peek_kind("/* unclosed INSERT", &kind) == 0);
     CHECK(parser_peek_kind("INSERTX INTO users", &kind) == 0);
-    CHECK(parser_peek_kind("UPDATE users SET age = 1;", &kind) == 0);
+    CHECK(parser_peek_kind("MERGE INTO users", &kind) == 0);
+    CHECK(parser_peek_kind("UPDATEX users", &kind) == 0);
     CHECK(parser_peek_kind("(INSERT", &kind) == 0);
     CHECK(parser_peek_kind("인 INSERT", &kind) == 0);
     CHECK(kind == STMT_INSERT); /* 0이면 *out을 바꾸지 않는다 */
+
+    CHECK(parser_peek_kind(" update users SET age = 1;", &kind) == 1);
+    CHECK(kind == STMT_UPDATE);
+    CHECK(parser_peek_kind("/* x */ DeLeTe broken", &kind) == 1);
+    CHECK(kind == STMT_DELETE);
 }
 
 static void test_parse_errors(void) {
     EXPECT_PARSE_ERROR("SELECT * FROM users", "세미콜론");
     EXPECT_PARSE_ERROR("INSERT INTO users (name, age) VALUES ('a', 1)", "세미콜론");
     EXPECT_PARSE_ERROR("SELECT * FROM users SELECT * FROM users;", "세미콜론");
-    EXPECT_PARSE_ERROR(";", "INSERT 또는 SELECT");
-    EXPECT_PARSE_ERROR("UPDATE users SET age = 1;", "INSERT 또는 SELECT");
+    EXPECT_PARSE_ERROR(";", "INSERT, SELECT, UPDATE 또는 DELETE");
+    EXPECT_PARSE_ERROR("MERGE INTO users;", "INSERT, SELECT, UPDATE 또는 DELETE");
     EXPECT_PARSE_ERROR("SELECT * FROM orders;", "테이블 'orders'");
     EXPECT_PARSE_ERROR("SELECT name FROM users;", "SELECT *");
     EXPECT_PARSE_ERROR("SELECT * users;", "FROM");
@@ -556,7 +562,7 @@ static int count_insert(int64_t id, void *ctx) {
 static void expect_exec_error(Table *t, const char *name, int age, const char *needle) {
     char buf[300];
     InsertRow row;
-    Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
+    Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0, NULL, 0, 0};
     DbError err = {{0}};
 
     snprintf(buf, sizeof buf, "%s", name);
@@ -597,9 +603,9 @@ static void test_executor_validation(void) {
     /* 경계값은 성공한다. */
     {
         InsertRow row = {name255, 0};
-        Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
+        Statement st = {STMT_INSERT, &row, 1, WHERE_NONE, 0, NULL, 0, 0};
         int64_t last = 0;
-        ResultSink sink = {count_insert, NULL, &last};
+        ResultSink sink = {count_insert, NULL, &last, NULL};
 
         CHECK(table_open(dir, &t, &err) == 0);
         CHECK(executor_run(t, &st, &sink, &err) == 0 && last == 1);
@@ -618,8 +624,8 @@ static void test_executor_insert_select(void) {
     char kim[] = "kim";
     char lee[] = "lee";
     InsertRow row = {kim, 20};
-    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
-    Statement sel = {STMT_SELECT, NULL, 0, WHERE_NONE, 0};
+    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0, NULL, 0, 0};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_NONE, 0, NULL, 0, 0};
     ResultSink sink;
 
     memset(&c, 0, sizeof c);
@@ -644,8 +650,8 @@ static void test_executor_insert_select(void) {
 
 /* WHERE 조건으로 조회한 id 목록을 ids에 담고 개수를 돌려준다. */
 static int select_where(Table *t, WhereKind kind, int64_t value, int64_t *ids) {
-    Statement sel = {STMT_SELECT, NULL, 0, WHERE_NONE, 0};
-    ResultSink sink = {NULL, collect_row, NULL};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_NONE, 0, NULL, 0, 0};
+    ResultSink sink = {NULL, collect_row, NULL, NULL};
     DbError err = {{0}};
     Collected c;
     int i;
@@ -699,7 +705,7 @@ static void test_executor_select_paths(void) {
     const char bad[] = "1\ta\t25\n2\tb\n";
     Table *t = NULL;
     DbError err = {{0}};
-    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25, NULL, 0, 0};
     Collected c = {0};
     char path[600];
     FILE *fp;
@@ -806,9 +812,9 @@ static void test_reader_executor(void) {
     TableReader *r = NULL;
     DbError err = {{0}};
     InsertRow row = {kim, 20};
-    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25};
-    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0};
-    ResultSink sink = {NULL, collect_row, NULL};
+    Statement sel = {STMT_SELECT, NULL, 0, WHERE_AGE, 25, NULL, 0, 0};
+    Statement ins = {STMT_INSERT, &row, 1, WHERE_NONE, 0, NULL, 0, 0};
+    ResultSink sink = {NULL, collect_row, NULL, NULL};
     Collected c;
 
     write_file(dir, data, sizeof data - 1);
@@ -983,9 +989,9 @@ static void test_executor_multi_row(void) {
     char b[] = "b";
     char c[] = "c";
     InsertRow rows[3] = {{a, 1}, {b, 2}, {c, 151}};
-    Statement st = {STMT_INSERT, rows, 3, WHERE_NONE, 0};
+    Statement st = {STMT_INSERT, rows, 3, WHERE_NONE, 0, NULL, 0, 0};
     InsertedIds ids;
-    ResultSink sink = {record_ids, NULL, &ids};
+    ResultSink sink = {record_ids, NULL, &ids, NULL};
     Table *t = NULL;
     DbError err = {{0}};
     Collected got;
@@ -1018,9 +1024,9 @@ static void test_executor_multi_row_partial_write(void) {
     char b[] = "b";
     char c[] = "c";
     InsertRow rows[2] = {{b, 2}, {c, 3}};
-    Statement st = {STMT_INSERT, rows, 2, WHERE_NONE, 0};
+    Statement st = {STMT_INSERT, rows, 2, WHERE_NONE, 0, NULL, 0, 0};
     InsertedIds ids;
-    ResultSink sink = {record_ids, NULL, &ids};
+    ResultSink sink = {record_ids, NULL, &ids, NULL};
     Table *t = NULL;
     DbError err = {{0}};
     struct rlimit previous;
@@ -1206,6 +1212,325 @@ static void test_append_rows_offsets(void) {
     CHECK(table_close(t, &err) == 0);
 }
 
+/* ---------- UPDATE·DELETE ---------- */
+
+static void test_parse_update_delete(void) {
+    Statement st;
+    DbError err = {{0}};
+
+    CHECK(parse_one("UPDATE users SET age = 31 WHERE id = 2;", &st, &err) == 1);
+    CHECK(st.kind == STMT_UPDATE && st.set_name == NULL && st.has_set_age && st.set_age == 31);
+    CHECK(st.where == WHERE_ID && st.where_value == 2 && st.rows == NULL);
+    statement_free(&st);
+
+    CHECK(parse_one("update USERS set AGE = 5, Name = 'O''Brien; --x';", &st, &err) == 1);
+    CHECK(st.kind == STMT_UPDATE && st.set_name != NULL && strcmp(st.set_name, "O'Brien; --x") == 0);
+    CHECK(st.has_set_age && st.set_age == 5 && st.where == WHERE_NONE);
+    statement_free(&st);
+    CHECK(st.set_name == NULL);
+    statement_free(&st); /* 두 번 불러도 안전 */
+
+    CHECK(parse_one("UPDATE users /* c */ SET name = '김'\n WHERE age = 30 -- 끝\n;", &st, &err) == 1);
+    CHECK(st.kind == STMT_UPDATE && strcmp(st.set_name, "김") == 0 && !st.has_set_age);
+    CHECK(st.where == WHERE_AGE && st.where_value == 30);
+    statement_free(&st);
+
+    CHECK(parse_one("DELETE FROM users WHERE age = 30;", &st, &err) == 1);
+    CHECK(st.kind == STMT_DELETE && st.where == WHERE_AGE && st.where_value == 30);
+    CHECK(st.set_name == NULL && !st.has_set_age);
+    statement_free(&st);
+
+    CHECK(parse_one("delete from Users;", &st, &err) == 1);
+    CHECK(st.kind == STMT_DELETE && st.where == WHERE_NONE);
+    statement_free(&st);
+}
+
+static void test_parse_update_delete_errors(void) {
+    EXPECT_PARSE_ERROR("UPDATE users SET id = 3;", "id는 자동으로 부여되므로 UPDATE");
+    EXPECT_PARSE_ERROR("UPDATE users SET age = 1, age = 2;", "중복");
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 'a', NAME = 'b';", "중복");
+    EXPECT_PARSE_ERROR("UPDATE users SET email = 'a';", "컬럼 'email'");
+    EXPECT_PARSE_ERROR("UPDATE users SET;", "컬럼 이름");
+    EXPECT_PARSE_ERROR("UPDATE users SET age = 1,;", "컬럼 이름");
+    EXPECT_PARSE_ERROR("UPDATE users age = 1;", "SET");
+    EXPECT_PARSE_ERROR("UPDATE SET age = 1;", "테이블 'SET'");
+    EXPECT_PARSE_ERROR("UPDATE orders SET age = 1;", "테이블 'orders'");
+    EXPECT_PARSE_ERROR("UPDATE users SET age 1;", "'='");
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 1;", "작은따옴표");
+    EXPECT_PARSE_ERROR("UPDATE users SET age = 'x';", "age에는 정수");
+    EXPECT_PARSE_ERROR("UPDATE users SET age = 99999999999;", "허용 범위");
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 'a' age = 1;", "세미콜론");
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 'a' WHERE name = 'a';", "name 조건");
+    EXPECT_PARSE_ERROR("UPDATE users SET age = 1 WHERE id = 1 AND age = 2;", "AND/OR");
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 'x' WHERE id = 1", "세미콜론");
+    /* SET name을 읽은 뒤 실패해도 Statement는 해제된다(누수는 sanitize에서 확인). */
+    EXPECT_PARSE_ERROR("UPDATE users SET name = 'x', age = 'y';", "age에는 정수");
+    EXPECT_PARSE_ERROR("DELETE users;", "FROM");
+    EXPECT_PARSE_ERROR("DELETE * FROM users;", "FROM");
+    EXPECT_PARSE_ERROR("DELETE FROM orders;", "테이블 'orders'");
+    EXPECT_PARSE_ERROR("DELETE FROM users WHERE id > 1;", "'=' 비교만");
+    EXPECT_PARSE_ERROR("DELETE FROM users WHERE age = '1';", "정수 값");
+    EXPECT_PARSE_ERROR("DELETE FROM users WHERE id = 99999999999999999999;", "64비트");
+    EXPECT_PARSE_ERROR("DELETE FROM users", "세미콜론");
+}
+
+static int record_change(size_t affected, void *ctx) {
+    *(size_t *)ctx = affected;
+    return 0;
+}
+
+/* SQL 한 문장을 파싱해 실행한다. UPDATE·DELETE의 변경 행 수는 *affected에 담는다. */
+static int run_sql(Table *t, const char *sql, size_t *affected, DbError *err) {
+    Statement st;
+    ResultSink sink = {NULL, NULL, affected, record_change};
+    int rc;
+
+    *affected = (size_t)-1;
+    if (parse_one(sql, &st, err) != 1) {
+        return -2;
+    }
+    rc = executor_run(t, &st, &sink, err);
+    statement_free(&st);
+    return rc;
+}
+
+static int file_exists(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return 0;
+    }
+    fclose(fp);
+    return 1;
+}
+
+static void test_executor_update_delete(void) {
+    const char *dir = fresh_dir("exec_modify");
+    const char data[] = "1\ta\t20\n2\tb\t30\n3\tc\t30\n4\td\t40\n";
+    char buf[512];
+    char before[512];
+    char tmp_path[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    Collected c;
+    size_t n = 0;
+    int64_t id = 0;
+
+    snprintf(tmp_path, sizeof tmp_path, "%s/users.tsv.tmp", dir);
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+
+    /* 여러 행 UPDATE: SET에 없는 컬럼과 id·순서는 그대로다. */
+    CHECK(run_sql(t, "UPDATE users SET age = 31 WHERE age = 30;", &n, &err) == 0 && n == 2);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, "1\ta\t20\n2\tb\t31\n3\tc\t31\n4\td\t40\n") == 0);
+    CHECK(run_sql(t, "UPDATE users SET name = 'bee' WHERE id = 2;", &n, &err) == 0 && n == 1);
+    CHECK(run_sql(t, "UPDATE users SET name = '길어진 이름', age = 0 WHERE id = 1;", &n, &err) == 0 &&
+          n == 1);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, "1\t길어진 이름\t0\n2\tbee\t31\n3\tc\t31\n4\td\t40\n") == 0);
+    CHECK(!file_exists(tmp_path));
+
+    /* 줄 길이가 바뀌어도 인덱스 위치가 새 파일을 가리킨다. */
+    memset(&c, 0, sizeof c);
+    CHECK(table_find_id(t, 3, collect_row, &c, &err) == 0 && c.count == 1 &&
+          strcmp(c.names[0], "c") == 0 && c.ages[0] == 31);
+
+    /* 일치하는 행이 없으면 0행이고 파일은 바뀌지 않는다. */
+    memcpy(before, buf, sizeof buf);
+    CHECK(run_sql(t, "UPDATE users SET age = 1 WHERE id = 99;", &n, &err) == 0 && n == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE age = 200;", &n, &err) == 0 && n == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = -1;", &n, &err) == 0 && n == 0);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, before) == 0);
+    CHECK(!file_exists(tmp_path));
+
+    /* 값 오류는 아무것도 바꾸지 않는다. */
+    CHECK(run_sql(t, "UPDATE users SET age = 151;", &n, &err) == -1 && strstr(err.msg, "허용 범위") != NULL);
+    CHECK(run_sql(t, "UPDATE users SET name = '' WHERE id = 1;", &n, &err) == -1 &&
+          strstr(err.msg, "빈 문자열") != NULL);
+    CHECK(run_sql(t, "UPDATE users SET name = 'a\tb';", &n, &err) == -1 && strstr(err.msg, "탭") != NULL);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, before) == 0);
+
+    /* DELETE: 지운 ID는 인덱스에서도 사라지고, 나머지 행의 위치는 맞다. */
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 1;", &n, &err) == 0 && n == 1);
+    memset(&c, 0, sizeof c);
+    CHECK(table_find_id(t, 1, collect_row, &c, &err) == 0 && c.count == 0);
+    CHECK(table_find_id(t, 4, collect_row, &c, &err) == 0 && c.count == 1 && c.ids[0] == 4);
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 3 && c.ids[0] == 2 && c.ids[2] == 4);
+
+    /* 마지막 ID를 지워도 실행 중에는 그 ID를 다시 쓰지 않는다. */
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 4;", &n, &err) == 0 && n == 1);
+    CHECK(table_append(t, "e", 50, &id, &err) == 0 && id == 5);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, "2\tbee\t31\n3\tc\t31\n5\te\t50\n") == 0);
+
+    /* 다시 열어도 변경이 남는다. 재시작하면 다음 ID는 파일의 최대 ID에서 다시 계산한다. */
+    CHECK(table_close(t, &err) == 0);
+    CHECK(table_open(dir, &t, &err) == 0);
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 3 && strcmp(c.names[0], "bee") == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 5;", &n, &err) == 0 && n == 1);
+    CHECK(table_close(t, &err) == 0);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_append(t, "f", 1, &id, &err) == 0 && id == 4);
+
+    /* 조건 없는 DELETE는 모든 행을 지운다. 빈 테이블에도 계속 추가할 수 있다. */
+    CHECK(run_sql(t, "DELETE FROM users;", &n, &err) == 0 && n == 3);
+    read_file(dir, buf, sizeof buf);
+    CHECK(buf[0] == '\0');
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 0);
+    CHECK(table_find_id(t, 2, collect_row, &c, &err) == 0 && c.count == 0);
+    CHECK(run_sql(t, "UPDATE users SET age = 1;", &n, &err) == 0 && n == 0);
+    CHECK(table_append(t, "g", 2, &id, &err) == 0 && id == 5);
+    CHECK(table_close(t, &err) == 0);
+}
+
+static int fail_rewrite(const Row *row, void *ctx, RowEdit *edit) {
+    (void)edit;
+    return row->id == *(int64_t *)ctx ? -1 : 0;
+}
+
+static int replace_bad(const Row *row, void *ctx, RowEdit *edit) {
+    (void)ctx;
+    if (row->id == 2) {
+        edit->action = REWRITE_REPLACE;
+        edit->name = "bad\tname";
+        edit->age = 1;
+    }
+    return 0;
+}
+
+static int delete_first(const Row *row, void *ctx, RowEdit *edit) {
+    (void)ctx;
+    if (row->id == 1) {
+        edit->action = REWRITE_DELETE;
+    }
+    return 0;
+}
+
+static void test_rewrite_failures_keep_file(void) {
+    const char *dir = fresh_dir("rewrite_fail");
+    const char data[] = "1\ta\t1\n2\tb\t2\n3\tc\t3\n";
+    char buf[256];
+    char tmp_path[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    size_t changed = 99;
+    int64_t stop_id = 3;
+    int64_t id = 0;
+
+    snprintf(tmp_path, sizeof tmp_path, "%s/users.tsv.tmp", dir);
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+
+    /* 콜백이 중간에 멈추면 앞에서 결정한 변경도 적용하지 않는다. */
+    CHECK(table_rewrite(t, fail_rewrite, &stop_id, &changed, &err) == -1 && changed == 0);
+    CHECK(strstr(err.msg, "행 처리") != NULL);
+    CHECK(table_rewrite(t, replace_bad, NULL, &changed, &err) == -1 && changed == 0);
+    CHECK(strstr(err.msg, "저장할 수 없는") != NULL);
+    CHECK(table_rewrite(t, NULL, NULL, &changed, &err) == -1 && changed == 0);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, data) == 0);
+    CHECK(!file_exists(tmp_path));
+
+    /* 실패 뒤에도 Table을 계속 쓸 수 있다. */
+    CHECK(table_append(t, "d", 4, &id, &err) == 0 && id == 4);
+    CHECK(table_rewrite(t, delete_first, NULL, &changed, &err) == 0 && changed == 1);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, "2\tb\t2\n3\tc\t3\n4\td\t4\n") == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
+#ifndef _WIN32
+static void test_rewrite_write_failure(void) {
+    /* 임시 파일 쓰기를 파일 크기 제한으로 실패시킨다. 원래 파일은 그대로고 Table도 계속 쓴다. */
+    const char *dir = fresh_dir("rewrite_write_fail");
+    const char data[] = "1\ta\t1\n2\tb\t2\n";
+    char buf[256];
+    char tmp_path[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    struct rlimit previous;
+    struct rlimit limited;
+    void (*old_handler)(int);
+    size_t changed = 99;
+    int rc;
+    int64_t id = 0;
+
+    snprintf(tmp_path, sizeof tmp_path, "%s/users.tsv.tmp", dir);
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(getrlimit(RLIMIT_FSIZE, &previous) == 0);
+    old_handler = signal(SIGXFSZ, SIG_IGN);
+    limited = previous;
+    limited.rlim_cur = 3;
+    CHECK(setrlimit(RLIMIT_FSIZE, &limited) == 0);
+    rc = table_rewrite(t, delete_first, NULL, &changed, &err);
+    CHECK(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+    signal(SIGXFSZ, old_handler);
+
+    CHECK(rc == -1 && changed == 0);
+    CHECK(strstr(err.msg, "임시 파일") != NULL);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, data) == 0);
+    CHECK(!file_exists(tmp_path));
+    CHECK(table_append(t, "c", 3, &id, &err) == 0 && id == 3);
+    CHECK(table_close(t, &err) == 0);
+}
+#endif
+
+static void test_reader_after_rewrite(void) {
+    /* 파일을 바꾸면 열린 reader도 새 파일과 새 인덱스로 읽는다. */
+    const char *dir = fresh_dir("reader_rewrite");
+    const char data[] = "1\ta\t25\n2\tb\t30\n3\tc\t25\n";
+    Table *t = NULL;
+    TableReader *r1 = NULL;
+    TableReader *r2 = NULL;
+    TableReader *r3 = NULL;
+    DbError err = {{0}};
+    Collected c;
+    size_t n = 0;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_reader_open(t, &r1, &err) == 0);
+    CHECK(table_reader_open(t, &r2, &err) == 0);
+    CHECK(table_reader_open(t, &r3, &err) == 0);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_scan(r1, collect_row, &c, &err) == 0 && c.count == 3); /* EOF 상태로 둔다 */
+
+    CHECK(run_sql(t, "UPDATE users SET name = 'longer name' WHERE id = 1;", &n, &err) == 0 && n == 1);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_scan(r1, collect_row, &c, &err) == 0 && c.count == 3 &&
+          strcmp(c.names[0], "longer name") == 0);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_find_id(r2, 3, collect_row, &c, &err) == 0 && c.count == 1 &&
+          strcmp(c.names[0], "c") == 0);
+
+    /* 가운데 reader를 닫은 뒤에도 남은 reader 목록이 맞다. */
+    CHECK(table_reader_close(r2, &err) == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE age = 25;", &n, &err) == 0 && n == 2);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_scan(r3, collect_row, &c, &err) == 0 && c.count == 1 && c.ids[0] == 2);
+    memset(&c, 0, sizeof c);
+    CHECK(table_reader_find_id(r1, 1, collect_row, &c, &err) == 0 && c.count == 0);
+    CHECK(table_reader_find_id(r1, 2, collect_row, &c, &err) == 0 && c.count == 1);
+
+    /* 읽기 핸들로는 UPDATE·DELETE를 실행하지 않는다. */
+    {
+        Statement st;
+        CHECK(parse_one("DELETE FROM users;", &st, &err) == 1);
+        CHECK(executor_run_read(r1, &st, NULL, &err) == -1 && strstr(err.msg, "SELECT만") != NULL);
+        statement_free(&st);
+    }
+    CHECK(table_reader_close(r1, &err) == 0);
+    CHECK(table_reader_close(r3, &err) == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "사용법: test_unit <임시 디렉터리>\n");
@@ -1260,6 +1585,15 @@ int main(int argc, char **argv) {
     test_append_rows_torn_large_write();
 #endif
     test_append_rows_offsets();
+
+    test_parse_update_delete();
+    test_parse_update_delete_errors();
+    test_executor_update_delete();
+    test_rewrite_failures_keep_file();
+#ifndef _WIN32
+    test_rewrite_write_failure();
+#endif
+    test_reader_after_rewrite();
 
     printf("단위 테스트: %d개 검사 중 %d개 실패\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

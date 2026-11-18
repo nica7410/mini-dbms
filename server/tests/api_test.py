@@ -183,12 +183,16 @@ class ApiTest(unittest.TestCase):
                             "INSERT INTO users (name, age) VALUES ('new', 2);",
                             "INSERT INTO users (name, age) VALUES ('a', 1), ('b', 2);",
                             "SELECT * FROM users;",
+                            "UPDATE users SET age = 3 WHERE id = 2;",
+                            "DELETE FROM users WHERE id = 99;",
                             "SELEC broken;"):
                     server.query(sql)
                 metrics = server.metrics()
                 kinds = metrics["request_kinds"]
                 self.assertEqual({name: kinds[name]["count"] for name in kinds},
-                                 {"insert": 2, "select": 2, "other": 1})
+                                 {"insert": 2, "select": 2, "update": 1, "delete": 1, "other": 1})
+                engine = metrics["engine"]
+                self.assertEqual((engine["successful_updates"], engine["successful_deletes"]), (1, 1))
                 for detail in kinds.values():
                     self.assertEqual(set(detail), {"count", "queue_wait_us", "max_queue_wait_us", "total_us"})
                     self.assertLessEqual(detail["max_queue_wait_us"], detail["queue_wait_us"])
@@ -197,9 +201,51 @@ class ApiTest(unittest.TestCase):
                 # Classified by first keyword: the broken SELECT still went to the read queue.
                 pools = metrics["pools"]
                 self.assertEqual((pools["read"]["workers"], pools["write"]["workers"]), (4, 2))
-                self.assertEqual((pools["read"]["accepted"], pools["write"]["accepted"]), (3, 2))
+                self.assertEqual((pools["read"]["accepted"], pools["write"]["accepted"]), (3, 4))
                 for field in ("workers", "accepted", "completed", "queue_wait_us", "expired"):
                     self.assertEqual(metrics["pool"][field], pools["read"][field] + pools["write"][field])
+
+    def test_update_delete(self):
+        with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory:
+            fixture(directory, 4)  # ages 1, 2, 3, 150
+            with Server(directory) as server:
+                status, updated = server.query("UPDATE users SET name = '바뀐 O''Brien', age = 7 WHERE id = 2;")
+                self.assertEqual(status, 200)
+                self.assertEqual(updated, {"ok": True, "request_id": updated["request_id"], "type": "update",
+                                           "affected_rows": 1, "write_outcome": "applied"})
+                # Every read worker sees the replaced file and index at once.
+                for _ in range(8):
+                    self.assertEqual(server.query("SELECT * FROM users WHERE id = 2;")[1]["rows"],
+                                     [{"id": "2", "name": "바뀐 O'Brien", "age": 7}])
+                status, missed = server.query("UPDATE users SET age = 1 WHERE id = 99;")
+                self.assertEqual((status, missed["type"], missed["affected_rows"], missed["write_outcome"]),
+                                 (200, "update", 0, "applied"))
+                status, deleted = server.query("DELETE FROM users WHERE age = 7;")
+                self.assertEqual((status, deleted["type"], deleted["affected_rows"]), (200, "delete", 1))
+                for _ in range(8):
+                    self.assertEqual(server.query("SELECT * FROM users WHERE id = 2;")[1]["rows"], [])
+                    self.assertEqual([r["id"] for r in server.query("SELECT * FROM users;")[1]["rows"]],
+                                     ["1", "3", "4"])
+                # The highest ID is not reused while the server runs.
+                self.assertEqual(server.query("DELETE FROM users WHERE id = 4;")[1]["affected_rows"], 1)
+                self.assertEqual(server.query("INSERT INTO users (name, age) VALUES ('new', 9);")[1]["inserted_id"], "5")
+
+                for sql in ("UPDATE users SET age = 151;", "UPDATE users SET name = '' WHERE id = 1;"):
+                    with self.subTest(sql=sql):
+                        status, error = server.query(sql)
+                        self.assertEqual((status, error["error"]["code"]), (422, "INVALID_VALUES"))
+                for sql in ("UPDATE users SET id = 1;", "DELETE users;", "UPDATE users SET age = 1; SELECT * FROM users;"):
+                    with self.subTest(sql=sql):
+                        self.assertEqual(server.query(sql)[0], 400)
+                self.assertEqual([r["age"] for r in server.query("SELECT * FROM users;")[1]["rows"]], [1, 3, 9])
+                self.assertFalse((Path(directory) / "users.tsv.tmp").exists())
+            with Server(directory) as restarted:
+                self.assertEqual([(r["id"], r["name"]) for r in restarted.query("SELECT * FROM users;")[1]["rows"]],
+                                 [("1", "user-1"), ("3", "user-3"), ("5", "new")])
+                status, cleared = restarted.query("DELETE FROM users;")
+                self.assertEqual((status, cleared["affected_rows"]), (200, 3))
+                self.assertEqual(restarted.query("SELECT * FROM users;")[1]["rows"], [])
+            self.assertEqual((Path(directory) / "users.tsv").read_bytes(), b"")
 
     def test_invalid_input_has_no_insert_side_effect(self):
         with tempfile.TemporaryDirectory(prefix="minidb-api-") as directory, Server(directory) as server:

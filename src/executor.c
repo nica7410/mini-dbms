@@ -5,14 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int validate_row(const InsertRow *row, DbError *err) {
+static int validate_name(const char *name, DbError *err) {
     size_t n;
 
-    if (row->name == NULL) {
+    if (name == NULL) {
         db_error_set(err, "name 값이 없습니다");
         return -1;
     }
-    n = strlen(row->name);
+    n = strlen(name);
     if (n == 0) {
         db_error_set(err, "name은 빈 문자열일 수 없습니다");
         return -1;
@@ -21,16 +21,26 @@ static int validate_row(const InsertRow *row, DbError *err) {
         db_error_set(err, "name이 %d바이트를 넘습니다 (%u바이트)", NAME_MAX_BYTES, (unsigned)n);
         return -1;
     }
-    if (strpbrk(row->name, "\t\r\n") != NULL) {
+    if (strpbrk(name, "\t\r\n") != NULL) {
         db_error_set(err, "name에 탭이나 줄바꿈을 넣을 수 없습니다");
         return -1;
     }
-    if (row->age < AGE_MIN || row->age > AGE_MAX) {
-        db_error_set(err, "age 값 %d이(가) 허용 범위(%d~%d)를 벗어났습니다",
-                     row->age, AGE_MIN, AGE_MAX);
+    return 0;
+}
+
+static int validate_age(int age, DbError *err) {
+    if (age < AGE_MIN || age > AGE_MAX) {
+        db_error_set(err, "age 값 %d이(가) 허용 범위(%d~%d)를 벗어났습니다", age, AGE_MIN, AGE_MAX);
         return -1;
     }
     return 0;
+}
+
+static int validate_row(const InsertRow *row, DbError *err) {
+    if (validate_name(row->name, err) != 0) {
+        return -1;
+    }
+    return validate_age(row->age, err);
 }
 
 /* 모든 행을 검사한다. 두 번째 행부터는 메시지에 행 번호를 붙인다. */
@@ -135,6 +145,86 @@ static int filter_age(const Row *row, void *ctx) {
     return f->next(row, f->next_ctx);
 }
 
+/* ---------- UPDATE·DELETE ---------- */
+
+static bool where_matches(const Statement *st, const Row *row) {
+    switch (st->where) {
+    case WHERE_NONE:
+        return true;
+    case WHERE_ID:
+        return row->id == st->where_value;
+    case WHERE_AGE:
+        return (int64_t)row->age == st->where_value;
+    }
+    return false;
+}
+
+/* table_rewrite 콜백. 일치한 행은 SET에 없는 컬럼을 원래 값으로 둔 채 바꾼다. */
+static int edit_update(const Row *row, void *ctx, RowEdit *edit) {
+    const Statement *st = ctx;
+
+    if (where_matches(st, row)) {
+        edit->action = REWRITE_REPLACE;
+        edit->name = st->set_name != NULL ? st->set_name : row->name;
+        edit->age = st->has_set_age ? st->set_age : row->age;
+    }
+    return 0;
+}
+
+static int edit_delete(const Row *row, void *ctx, RowEdit *edit) {
+    if (where_matches(ctx, row)) {
+        edit->action = REWRITE_DELETE;
+    }
+    return 0;
+}
+
+static int validate_update(const Statement *st, DbError *err) {
+    if (st->set_name == NULL && !st->has_set_age) {
+        db_error_set(err, "UPDATE할 컬럼이 없습니다");
+        return -1;
+    }
+    if (st->set_name != NULL && validate_name(st->set_name, err) != 0) {
+        return -1;
+    }
+    if (st->has_set_age && validate_age(st->set_age, err) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * 검증을 통과한 뒤 파일 전체를 다시 쓴다(table_rewrite). 일치한 행이 없으면 파일은 그대로다.
+ * 교체 전에 실패하면 아무것도 바뀌지 않는다. 교체 뒤 실패하면 바뀐 행 수를 먼저 알린다.
+ */
+static int run_modify(Table *t, const Statement *st, const ResultSink *sink, DbError *err) {
+    RewriteFn fn = st->kind == STMT_UPDATE ? edit_update : edit_delete;
+    size_t changed = 0;
+    bool reported = true;
+    int rc;
+
+    if (st->kind == STMT_UPDATE && validate_update(st, err) != 0) {
+        return -1;
+    }
+    /* 콜백은 Statement를 읽기만 한다. */
+    rc = table_rewrite(t, fn, (void *)st, &changed, err);
+    if (rc == 0 || changed > 0) {
+        reported = sink == NULL || sink->on_change == NULL || sink->on_change(changed, sink->ctx) == 0;
+    }
+    if (rc != 0) {
+        if (changed > 0 && err != NULL) {
+            char msg[sizeof err->msg];
+            memcpy(msg, err->msg, sizeof msg);
+            db_error_set(err, "변경 %u행은 적용됨: %s", (unsigned)changed, msg);
+        }
+        return -1;
+    }
+    if (!reported) {
+        db_error_set(err, "변경 %u행은 적용됨: 결과 출력에 실패했습니다", (unsigned)changed);
+        return -1;
+    }
+    return 0;
+}
+
 /* SELECT 실행. r이 NULL이 아니면 t 대신 r의 파일 핸들로 읽는다. */
 static int run_select(Table *t, TableReader *r, const Statement *st, const ResultSink *sink,
                       DbError *err) {
@@ -169,6 +259,9 @@ int executor_run(Table *t, const Statement *st, const ResultSink *sink, DbError 
         return run_insert(t, st, sink, err);
     case STMT_SELECT:
         return run_select(t, NULL, st, sink, err);
+    case STMT_UPDATE:
+    case STMT_DELETE:
+        return run_modify(t, st, sink, err);
     }
     db_error_set(err, "알 수 없는 문장 종류입니다");
     return -1;

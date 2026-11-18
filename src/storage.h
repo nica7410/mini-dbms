@@ -49,6 +49,35 @@ typedef struct {
 int table_append_rows(Table *t, const AppendRow *rows, size_t n, int64_t *first_id,
                       size_t *stored, DbError *err);
 
+/* table_rewrite가 행마다 받는 결정. 콜백을 부르기 전에 REWRITE_KEEP으로 채워 둔다. */
+typedef enum { REWRITE_KEEP, REWRITE_REPLACE, REWRITE_DELETE } RewriteAction;
+
+typedef struct {
+    RewriteAction action;
+    const char *name; /* REPLACE: 새 name. 콜백이 돌아온 직후 기록하므로 그때까지만 유효하면 된다 */
+    int age;          /* REPLACE: 새 age */
+} RowEdit;
+
+/* 0을 반환하면 계속, 0이 아니면 멈추고 아무것도 바꾸지 않는다. */
+typedef int (*RewriteFn)(const Row *row, void *ctx, RowEdit *edit);
+
+/*
+ * UPDATE·DELETE용. 저장 순서대로 모든 행에 fn을 호출해 남길지(KEEP), 바꿀지(REPLACE),
+ * 지울지(DELETE) 정한다. 결과를 임시 파일(users.tsv.tmp)에 모두 쓴 뒤 원래 파일과 바꾸고,
+ * 새 파일 기준으로 만든 ID 인덱스로 교체한다. id는 바뀌지 않으며 저장 순서도 그대로다.
+ * 비용은 문장마다 파일 전체를 읽고 쓰는 O(행 수)다.
+ * 성공: 0. *changed는 REPLACE·DELETE한 행 수. 0이면 파일을 바꾸지 않는다.
+ * 실패: -1.
+ *   *changed == 0: 파일과 인덱스는 그대로다. 파일을 다시 열지 못한 경우가 아니면 Table을
+ *                  계속 쓸 수 있다(table_usable과 같은 규칙).
+ *   *changed > 0 : 파일 교체는 끝났지만 다시 열지 못했다. 변경은 적용됐고 Table은 더 쓸 수 없다.
+ * 부여한 최대 ID(다음 INSERT의 ID 기준)는 줄지 않는다. 단, 재시작하면 파일에 남은 최대 ID에서
+ * 다시 계산하므로 끝쪽 ID를 지운 뒤 재시작하면 그 ID가 다시 쓰일 수 있다.
+ * 열려 있는 TableReader의 파일도 새 파일로 다시 연다. 따라서 reader 조회·열기·닫기와 동시에
+ * 실행하면 안 된다(table_append_rows와 같은 규칙).
+ */
+int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *err);
+
 /* 저장 순서대로 레코드를 하나씩 읽어 fn을 호출한다. fn이 NULL이면 검증만 한다. */
 int table_scan(Table *t, RowFn fn, void *ctx, DbError *err);
 
@@ -65,8 +94,10 @@ int table_close(Table *t, DbError *err);
  * - reader는 Table보다 먼저 닫아야 한다.
  * - 한 reader를 여러 스레드가 동시에 쓰면 안 된다. Table도 마찬가지다.
  *   (파일은 FILE 잠금 없이 읽으므로 같은 핸들의 동시 사용은 정의되지 않은 동작이다.)
- * - 인덱스를 공유하므로 reader 조회와 table_append·table_append_rows가 동시에 실행되면 안 된다.
- *   (읽기끼리는 동시에 실행해도 된다. 동기화는 호출자가 맡는다.)
+ * - 인덱스를 공유하므로 reader 조회와 table_append·table_append_rows·table_rewrite가 동시에
+ *   실행되면 안 된다. (읽기끼리는 동시에 실행해도 된다. 동기화는 호출자가 맡는다.)
+ * - Table은 열린 reader 목록을 갖는다. table_rewrite가 파일을 바꾸면 reader의 파일도 다시 연다.
+ *   reader 열기·닫기도 쓰기와 동시에 실행하면 안 된다.
  * 조회 규칙과 반환값은 table_scan / table_find_id와 같다.
  */
 typedef struct TableReader TableReader;

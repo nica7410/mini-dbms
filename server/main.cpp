@@ -48,7 +48,7 @@ std::uint64_t microseconds_between(Clock::time_point from, Clock::time_point to)
 
 // Accepted /query tasks by what the worker found them to be. The queue itself
 // does not know the kind; it is decided after the worker parses the SQL.
-enum class RequestKind : std::size_t { Insert, Select, Other, Count };
+enum class RequestKind : std::size_t { Insert, Select, Update, Delete, Other, Count };
 
 class RequestKindMetrics {
 public:
@@ -92,9 +92,11 @@ private:
 
 // Only the first keyword is read. A wrong guess costs scheduling, not results:
 // the worker parses the whole statement again and any worker can run any SQL.
-bool looks_like_insert(const std::string &sql) noexcept {
+// INSERT, UPDATE and DELETE go to the write queue; everything else, including
+// SQL whose first word is not a statement keyword, goes to the read queue.
+bool looks_like_write(const std::string &sql) noexcept {
     StmtKind kind = STMT_SELECT;
-    return parser_peek_kind(sql.c_str(), &kind) == 1 && kind == STMT_INSERT;
+    return parser_peek_kind(sql.c_str(), &kind) == 1 && kind != STMT_SELECT;
 }
 
 void write_pool_stats(Json::Value &out, const minidb::PoolStats &stats, std::uint64_t expired) {
@@ -156,14 +158,14 @@ void usage() {
         << "  --host ADDRESS          Listen address (127.0.0.1)\n"
         << "  --port N                TCP port (8080)\n"
         << "  --workers N             Read SQL workers (4)\n"
-        << "  --write-workers N       INSERT workers (2)\n"
+        << "  --write-workers N       INSERT/UPDATE/DELETE workers (2)\n"
         << "  --io-threads N          HTTP event loops (2)\n"
         << "  --queue-capacity N      Maximum waiting SQL tasks, per queue (256)\n"
         << "  --queue-bytes N         Maximum waiting request bytes, per queue (16777216)\n"
         << "  --max-sql-bytes N       SQL UTF-8 byte limit (65536)\n"
         << "  --max-rows N            SELECT result row limit (10000)\n"
         << "  --max-result-bytes N    JSON result byte limit, >= 512 (8388608)\n"
-        << "  --queue-timeout-ms N    Expiry before SQL execution; INSERT also checks\n"
+        << "  --queue-timeout-ms N    Expiry before SQL execution; writes also check\n"
         << "                          after waiting for the write lock (5000)\n"
         << "  --max-connections N     HTTP connection limit (1024)\n"
         << "  --help                  Show this message\n";
@@ -328,6 +330,19 @@ void add_inserted_range(Json::Value &value, const minidb::QueryResult &result) {
     add_inserted_range(value, result.inserted_id, result.last_inserted_id, result.inserted_count);
 }
 
+bool is_modify(minidb::QueryKind kind) noexcept {
+    return kind == minidb::QueryKind::Update || kind == minidb::QueryKind::Delete;
+}
+
+const char *kind_name(minidb::QueryKind kind) noexcept {
+    switch (kind) {
+        case minidb::QueryKind::Insert: return "insert";
+        case minidb::QueryKind::Update: return "update";
+        case minidb::QueryKind::Delete: return "delete";
+        default: return "select";
+    }
+}
+
 drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
                                      const std::string &id, std::size_t byte_limit) {
     if (result.status != minidb::QueryStatus::Ok) {
@@ -339,8 +354,15 @@ drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
             add_inserted_range(stored, result);
             return error_response(mapped.first, id, mapped.second, result.error, "partial", stored);
         }
+        if (is_modify(result.kind) && result.committed) {
+            // The rewritten file replaced the old one, then reopening it failed.
+            Json::Value applied(Json::objectValue);
+            applied["affected_rows"] = Json::UInt64(result.affected_count);
+            return error_response(mapped.first, id, mapped.second, result.error, "applied", applied);
+        }
+        const bool write = result.is_insert || is_modify(result.kind);
         const std::string outcome =
-            result.is_insert && result.status == minidb::QueryStatus::StorageError ? "unknown" : "";
+            write && result.status == minidb::QueryStatus::StorageError ? "unknown" : "";
         return error_response(mapped.first, id, mapped.second, result.error, outcome);
     }
     Json::Value value(Json::objectValue);
@@ -349,6 +371,11 @@ drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
     if (result.is_insert) {
         value["type"] = "insert";
         add_inserted_range(value, result);
+        value["write_outcome"] = "applied";
+    } else if (is_modify(result.kind)) {
+        // Applied even with 0 affected rows: the statement ran to completion.
+        value["type"] = kind_name(result.kind);
+        value["affected_rows"] = Json::UInt64(result.affected_count);
         value["write_outcome"] = "applied";
     } else {
         value["type"] = "select";
@@ -369,7 +396,8 @@ drogon::HttpResponsePtr query_response(const minidb::QueryResult &result,
     auto body = serialize(value);
     if (body.size() > byte_limit) {
         return error_response(422, id, "RESULT_TOO_LARGE", "Serialized result exceeds the response byte limit",
-                              result.committed ? "applied" : "");
+                              result.committed || (is_modify(result.kind) && result.status == minidb::QueryStatus::Ok)
+                                  ? "applied" : "");
     }
     return body_response(200, std::move(body));
 }
@@ -411,8 +439,9 @@ int serve(const Options &options) {
     std::atomic<std::uint64_t> read_expired{0};
     std::atomic<std::uint64_t> write_expired{0};
     RequestKindMetrics kinds;
-    // INSERT and SELECT wait in separate queues so neither waits behind the other's
-    // backlog. Write workers take engine worker indices after the read workers.
+    // Writes (INSERT/UPDATE/DELETE) and SELECT wait in separate queues so neither
+    // waits behind the other's backlog. Write workers take engine worker indices
+    // after the read workers.
     minidb::ThreadPool read_pool(options.workers, options.queue_capacity, options.queue_bytes);
     minidb::ThreadPool write_pool(options.write_workers, options.queue_capacity, options.queue_bytes);
     std::atomic<bool> stopping{false};
@@ -460,7 +489,7 @@ int serve(const Options &options) {
                 callback(error_response(400, id, "INVALID_REQUEST", "SQL must be valid UTF-8"));
                 return;
             }
-            const bool write = looks_like_insert(sql);
+            const bool write = looks_like_write(sql);
             auto &pool = write ? write_pool : read_pool;
             auto *expired = write ? &write_expired : &read_expired;
             const std::size_t first_worker = write ? options.workers : 0;
@@ -477,6 +506,8 @@ int serve(const Options &options) {
                     // which rows were stored without touching the QueryResult.
                     std::int64_t first_id = 0, last_id = 0;
                     std::size_t inserted = 0;
+                    bool modified = false; // UPDATE/DELETE that ran to completion or was applied
+                    std::size_t affected = 0;
                     drogon::HttpResponsePtr response;
                     // Expired tasks and unparsable SQL never reveal their kind.
                     auto kind = RequestKind::Other;
@@ -485,14 +516,24 @@ int serve(const Options &options) {
                         auto result = started_at > deadline ? minidb::QueryResult{}
                                                             : engine.execute(first_worker + worker, sql, deadline);
                         if (started_at > deadline || result.status == minidb::QueryStatus::Expired) {
-                            // Expired in the queue, or (INSERT) while waiting for the
-                            // write lock. Either way nothing was written.
+                            // Expired in the queue, or (INSERT/UPDATE/DELETE) while waiting
+                            // for the write lock. Either way nothing was written.
                             expired->fetch_add(1, std::memory_order_relaxed);
                             response = error_response(503, id, "QUEUE_TIMEOUT", "Task expired before SQL execution", "not_started");
                         } else {
-                            if (result.is_insert) kind = RequestKind::Insert;
-                            else if (result.status != minidb::QueryStatus::InvalidSql) kind = RequestKind::Select;
-                            if (result.committed) {
+                            switch (result.kind) {
+                                case minidb::QueryKind::Insert: kind = RequestKind::Insert; break;
+                                case minidb::QueryKind::Update: kind = RequestKind::Update; break;
+                                case minidb::QueryKind::Delete: kind = RequestKind::Delete; break;
+                                case minidb::QueryKind::Select: kind = RequestKind::Select; break;
+                                case minidb::QueryKind::Unknown: break;
+                            }
+                            if (is_modify(result.kind) &&
+                                (result.committed || result.status == minidb::QueryStatus::Ok)) {
+                                outcome_on_throw = "applied";
+                                modified = true;
+                                affected = result.affected_count;
+                            } else if (result.committed) {
                                 outcome_on_throw =
                                     result.status == minidb::QueryStatus::Ok ? "applied" : "partial";
                                 first_id = result.inserted_id;
@@ -504,13 +545,14 @@ int serve(const Options &options) {
                     } catch (const std::exception &) {
                         Json::Value stored(Json::objectValue);
                         if (inserted > 0) add_inserted_range(stored, first_id, last_id, inserted);
+                        if (modified) stored["affected_rows"] = Json::UInt64(affected);
                         response = error_response(500, id, "INTERNAL_ERROR", "Request processing failed",
                                                   outcome_on_throw, stored);
                     }
                     kinds.record(kind, microseconds_between(queued_at, started_at),
                                  microseconds_between(queued_at, Clock::now()));
                     // Drogon hands the response back to the connection's I/O loop.
-                    // Transmission failure never rolls back an already applied INSERT.
+                    // Transmission failure never rolls back an already applied write.
                     done(response);
                 }, bytes);
             if (submitted != minidb::ThreadPool::SubmitResult::Accepted) {
@@ -542,7 +584,7 @@ int serve(const Options &options) {
         write_pool_stats(result["pool"], combine(reads, writes), read_expiries + write_expiries);
         write_pool_stats(result["pools"]["read"], reads, read_expiries);
         write_pool_stats(result["pools"]["write"], writes, write_expiries);
-        const char *kind_names[] = {"insert", "select", "other"};
+        const char *kind_names[] = {"insert", "select", "update", "delete", "other"};
         static_assert(sizeof kind_names / sizeof kind_names[0] == static_cast<std::size_t>(RequestKind::Count),
                       "every RequestKind needs a /metrics name");
         for (std::size_t i = 0; i < static_cast<std::size_t>(RequestKind::Count); ++i) {
@@ -558,6 +600,8 @@ int serve(const Options &options) {
         db["requests"] = Json::UInt64(database.requests);
         db["successful_inserts"] = Json::UInt64(database.successful_inserts);
         db["successful_selects"] = Json::UInt64(database.successful_selects);
+        db["successful_updates"] = Json::UInt64(database.successful_updates);
+        db["successful_deletes"] = Json::UInt64(database.successful_deletes);
         db["errors"] = Json::UInt64(database.errors);
         db["current_executions"] = Json::UInt64(database.current_executions);
         db["peak_executions"] = Json::UInt64(database.peak_executions);

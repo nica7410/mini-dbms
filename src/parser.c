@@ -8,10 +8,13 @@
 
 /*
  * 구조: Lexer(next_token)가 SQL 텍스트를 토큰으로 자르고,
- * 재귀 하강 파서(parse_insert / parse_select)가 토큰 순서를 문법과 맞춰 본다.
+ * 재귀 하강 파서(parse_insert / parse_select / parse_update / parse_delete)가
+ * 토큰 순서를 문법과 맞춰 본다.
  *
  * INSERT INTO users ( 컬럼 [, 컬럼] ) VALUES ( 값 [, 값] ) [, ( 값 [, 값] )]* ;
  * SELECT * FROM users [ WHERE id|age = 정수 ] ;
+ * UPDATE users SET name|age = 값 [, name|age = 값] [ WHERE id|age = 정수 ] ;
+ * DELETE FROM users [ WHERE id|age = 정수 ] ;
  */
 
 typedef enum {
@@ -597,6 +600,94 @@ static int parse_select(Parser *p, Statement *out) {
     return expect_end(p);
 }
 
+/* SET 컬럼 = 값 [, 컬럼 = 값]. name과 age를 각각 한 번까지 쓸 수 있다. id는 바꿀 수 없다. */
+static int parse_set(Parser *p, Statement *out) {
+    int seen[COL_COUNT] = {0, 0};
+
+    for (;;) {
+        int col;
+        int shown = p->cur.len > 64 ? 64 : (int)p->cur.len;
+
+        if (p->cur.kind != TOK_IDENT) {
+            return syntax_error(p, "컬럼 이름");
+        }
+        if (tok_is(&p->cur, "name")) {
+            col = COL_NAME;
+        } else if (tok_is(&p->cur, "age")) {
+            col = COL_AGE;
+        } else if (tok_is(&p->cur, "id")) {
+            db_error_set(p->err, "id는 자동으로 부여되므로 UPDATE로 바꿀 수 없습니다");
+            return -1;
+        } else {
+            db_error_set(p->err, "컬럼 '%.*s'이(가) 존재하지 않습니다", shown, p->cur.text);
+            return -1;
+        }
+        if (seen[col]) {
+            db_error_set(p->err, "컬럼 '%.*s'이(가) 중복되었습니다", shown, p->cur.text);
+            return -1;
+        }
+        seen[col] = 1;
+        if (advance(p) != 0 || expect(p, TOK_EQ, "'='") != 0) {
+            return -1;
+        }
+        if (col == COL_NAME) {
+            if (p->cur.kind != TOK_STRING) {
+                db_error_set(p->err, "name에는 작은따옴표로 감싼 문자열 값이 필요합니다");
+                return -1;
+            }
+            out->set_name = decode_string(&p->cur, p->err);
+            if (out->set_name == NULL) {
+                return -1;
+            }
+        } else {
+            if (p->cur.kind != TOK_INT) {
+                db_error_set(p->err, "age에는 정수 값이 필요합니다");
+                return -1;
+            }
+            if (parse_int_value(p, &out->set_age) != 0) {
+                return -1;
+            }
+            out->has_set_age = 1;
+        }
+        if (advance(p) != 0) {
+            return -1;
+        }
+        if (p->cur.kind != TOK_COMMA) {
+            return 0;
+        }
+        if (advance(p) != 0) {
+            return -1;
+        }
+    }
+}
+
+static int parse_update(Parser *p, Statement *out) {
+    out->kind = STMT_UPDATE;
+    if (advance(p) != 0 || /* UPDATE */
+        parse_table(p) != 0 ||
+        expect_word(p, "set", "SET") != 0 ||
+        parse_set(p, out) != 0) {
+        return -1;
+    }
+    if (tok_is(&p->cur, "where") && parse_where(p, out) != 0) {
+        return -1;
+    }
+    return expect_end(p);
+}
+
+static int parse_delete(Parser *p, Statement *out) {
+    out->kind = STMT_DELETE;
+    if (advance(p) != 0 || /* DELETE */
+        expect_word(p, "from", "FROM") != 0 ||
+        parse_table(p) != 0) {
+        return -1;
+    }
+    if (tok_is(&p->cur, "where") && parse_where(p, out) != 0) {
+        return -1;
+    }
+    return expect_end(p);
+}
+
 /* ---------- 공개 함수 ---------- */
 
 int parser_next(const char *sql, size_t *pos, Statement *out, DbError *err) {
@@ -608,6 +699,9 @@ int parser_next(const char *sql, size_t *pos, Statement *out, DbError *err) {
     out->row_count = 0;
     out->where = WHERE_NONE;
     out->where_value = 0;
+    out->set_name = NULL;
+    out->set_age = 0;
+    out->has_set_age = 0;
 
     p.sql = sql;
     p.pos = *pos;
@@ -624,8 +718,12 @@ int parser_next(const char *sql, size_t *pos, Statement *out, DbError *err) {
         rc = parse_insert(&p, out);
     } else if (tok_is(&p.cur, "select")) {
         rc = parse_select(&p, out);
+    } else if (tok_is(&p.cur, "update")) {
+        rc = parse_update(&p, out);
+    } else if (tok_is(&p.cur, "delete")) {
+        rc = parse_delete(&p, out);
     } else {
-        rc = syntax_error(&p, "INSERT 또는 SELECT");
+        rc = syntax_error(&p, "INSERT, SELECT, UPDATE 또는 DELETE");
     }
     if (rc != 0) {
         statement_free(out);
@@ -652,6 +750,14 @@ int parser_peek_kind(const char *sql, StmtKind *out) {
         *out = STMT_SELECT;
         return 1;
     }
+    if (tok_is(&p.cur, "update")) {
+        *out = STMT_UPDATE;
+        return 1;
+    }
+    if (tok_is(&p.cur, "delete")) {
+        *out = STMT_DELETE;
+        return 1;
+    }
     return 0;
 }
 
@@ -665,4 +771,6 @@ void statement_free(Statement *st) {
     free(st->rows);
     st->rows = NULL;
     st->row_count = 0;
+    free(st->set_name);
+    st->set_name = NULL;
 }

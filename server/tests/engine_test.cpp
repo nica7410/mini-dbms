@@ -547,6 +547,85 @@ void test_insert_deadline_is_checked_after_the_gate() {
     require(engine.healthy(), "expiry marked the engine unhealthy");
 }
 
+void test_update_delete_results() {
+    TempDirectory directory;
+    directory.seed(4); // ages 1, 2, 3, 4
+    Engine engine(directory.options(2));
+    auto updated = engine.execute(1, "UPDATE users SET name = 'renamed', age = 30 WHERE age = 2;");
+    require(updated.status == QueryStatus::Ok && updated.kind == minidb::QueryKind::Update &&
+            !updated.is_insert && updated.committed && updated.affected_count == 1,
+            "UPDATE did not report one changed row");
+    auto row = engine.execute(0, "SELECT * FROM users WHERE id = 2;");
+    require(row.status == QueryStatus::Ok && row.rows.size() == 1 && row.rows[0].name == "renamed" &&
+            row.rows[0].age == 30, "another worker did not see the updated row");
+
+    auto none = engine.execute(1, "DELETE FROM users WHERE id = 99;");
+    require(none.status == QueryStatus::Ok && none.kind == minidb::QueryKind::Delete &&
+            !none.committed && none.affected_count == 0, "DELETE without a match changed something");
+    auto deleted = engine.execute(0, "DELETE FROM users WHERE id = 4;");
+    require(deleted.status == QueryStatus::Ok && deleted.committed && deleted.affected_count == 1,
+            "DELETE did not report one removed row");
+    auto inserted = engine.execute(1, "INSERT INTO users (name, age) VALUES ('after', 5);");
+    require(inserted.status == QueryStatus::Ok && inserted.inserted_id == 5,
+            "a deleted maximum ID was reused while the engine ran");
+
+    auto invalid = engine.execute(1, "UPDATE users SET age = 151;");
+    require(invalid.status == QueryStatus::InvalidValues && invalid.kind == minidb::QueryKind::Update,
+            "an out-of-range UPDATE was not a value error");
+    auto bad_sql = engine.execute(1, "UPDATE users SET id = 1;");
+    require(bad_sql.status == QueryStatus::InvalidSql && bad_sql.kind == minidb::QueryKind::Unknown,
+            "UPDATE of id was not an SQL error");
+
+    const auto past = Engine::Deadline::clock::now() - std::chrono::milliseconds(1);
+    auto expired = engine.execute(1, "DELETE FROM users;", past);
+    require(expired.status == QueryStatus::Expired && !expired.committed && expired.affected_count == 0,
+            "an expired DELETE was not reported as expired");
+    auto scan = engine.execute(0, "SELECT * FROM users;");
+    require(scan.status == QueryStatus::Ok && scan.rows.size() == 4, "an expired or invalid write changed rows");
+
+    const auto stats = engine.stats();
+    require(stats.successful_updates == 1 && stats.successful_deletes == 2 && stats.successful_inserts == 1,
+            "UPDATE/DELETE statistics differ");
+    require(engine.healthy(), "UPDATE/DELETE damaged health state");
+}
+
+void test_reads_during_rewrites() {
+    // Readers keep their own FILE*, which UPDATE replaces under the exclusive
+    // gate. Every scan must see one whole version of the table.
+    constexpr std::size_t rows = 300;
+    TempDirectory directory;
+    directory.seed(rows);
+    Engine engine(directory.options(4));
+    require(engine.execute(3, "UPDATE users SET age = 0;").affected_count == rows, "initial UPDATE failed");
+    std::atomic<bool> done{false};
+    parallel(4, [&](std::size_t worker) {
+        if (worker == 3) {
+            for (int round = 1; round <= 40; ++round) {
+                auto result = engine.execute(worker, "UPDATE users SET age = " + std::to_string(round) + ";");
+                require(result.status == QueryStatus::Ok && result.affected_count == rows, "concurrent UPDATE failed");
+            }
+            done.store(true);
+            return;
+        }
+        std::size_t reads = 0;
+        while (!done.load() || reads < 5) {
+            auto scan = engine.execute(worker, "SELECT * FROM users;");
+            require(scan.status == QueryStatus::Ok && scan.rows.size() == rows, "scan during UPDATE lost rows");
+            for (const auto& row : scan.rows) {
+                require(row.age == scan.rows[0].age, "scan mixed two versions of the table");
+            }
+            const auto id = 1 + (reads * 37 + worker) % rows;
+            auto found = engine.execute(worker, "SELECT * FROM users WHERE id = " + std::to_string(id) + ";");
+            require(found.status == QueryStatus::Ok && found.rows.size() == 1 &&
+                    found.rows[0].id == static_cast<std::int64_t>(id), "index lookup during UPDATE failed");
+            ++reads;
+        }
+    });
+    auto last = engine.execute(0, "SELECT * FROM users WHERE age = 40;");
+    require(last.status == QueryStatus::Ok && last.rows.size() == rows, "final UPDATE is not visible");
+    require(engine.healthy(), "concurrent rewrites poisoned the database");
+}
+
 } // namespace
 
 int main() {
@@ -564,6 +643,8 @@ int main() {
         test_parallel_batches_are_contiguous();
         test_multi_row_partial_write();
         test_insert_deadline_is_checked_after_the_gate();
+        test_update_delete_results();
+        test_reads_during_rewrites();
         std::cout << "engine tests passed\n";
         return 0;
     } catch (const std::exception& error) {

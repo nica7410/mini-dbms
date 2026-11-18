@@ -8,9 +8,9 @@
 
 /* Parser: SQL 텍스트 → Statement. 파일 저장은 하지 않는다. */
 
-typedef enum { STMT_INSERT, STMT_SELECT } StmtKind;
+typedef enum { STMT_INSERT, STMT_SELECT, STMT_UPDATE, STMT_DELETE } StmtKind;
 
-/* SELECT의 WHERE 조건: 없음, id = 값, age = 값 */
+/* SELECT·UPDATE·DELETE의 WHERE 조건: 없음, id = 값, age = 값 */
 typedef enum { WHERE_NONE, WHERE_ID, WHERE_AGE } WhereKind;
 
 /* INSERT 한 문장에 넣을 수 있는 최대 행 수. 묶음 전체가 쓰기 잠금 안에서 실행되므로
@@ -26,8 +26,12 @@ typedef struct {
     StmtKind kind;
     InsertRow *rows;     /* INSERT: row_count개. Statement가 소유(malloc) */
     size_t row_count;    /* INSERT: 1 이상. 파싱 도중 실패하면 name까지 채운 행 수 */
-    WhereKind where;     /* SELECT */
-    int64_t where_value; /* SELECT: where가 WHERE_NONE이 아닐 때 비교할 값 */
+    WhereKind where;     /* SELECT·UPDATE·DELETE */
+    int64_t where_value; /* where가 WHERE_NONE이 아닐 때 비교할 값 */
+    /* UPDATE의 SET. 적어도 하나는 있다. 새 필드는 기존 위치 초기화를 깨지 않도록 끝에 둔다. */
+    char *set_name;      /* NULL이면 name을 바꾸지 않는다. Statement가 소유(malloc) */
+    int set_age;         /* has_set_age가 0이 아닐 때만 의미가 있다 */
+    int has_set_age;
 } Statement;
 
 /*
@@ -44,7 +48,7 @@ void statement_free(Statement *st);
 
 /*
  * 첫 키워드만 읽어 문장 종류를 추측한다. 공백·주석·대소문자 규칙은 parser_next와 같다.
- *  1: 첫 토큰이 INSERT 또는 SELECT. *out에 종류를 담는다
+ *  1: 첫 토큰이 INSERT, SELECT, UPDATE, DELETE 중 하나. *out에 종류를 담는다
  *  0: 그 밖의 경우(빈 입력, 주석만 있음, 다른 단어, 알 수 없는 문자, 닫히지 않은 주석)
  * 나머지 문장은 검사하지 않는다. 1을 돌려줘도 parser_next는 실패할 수 있다.
  * Phase 3 서버가 요청을 읽기·쓰기 큐로 나누는 데만 쓴다.

@@ -262,7 +262,13 @@ A5_CASES = [
     ("SELECT * FROM users WHERE id = 1 AND age = 1;", "AND/OR"),
     ("SELECT * FROM users WHERE id = 9223372036854775808;", "64비트"),
     ("SELECT * FROM users WHERE id = 1", "세미콜론"),
-    ("DELETE FROM users;", "INSERT 또는 SELECT"),
+    ("MERGE INTO users;", "INSERT, SELECT, UPDATE 또는 DELETE"),
+    ("UPDATE users SET id = 1;", "UPDATE로 바꿀 수 없습니다"),
+    ("UPDATE users SET age = 151;", "범위"),
+    ("UPDATE users SET name = '' WHERE id = 1;", "빈 문자열"),
+    ("UPDATE users SET age = 1 WHERE name = 'a';", "id 또는 age"),
+    ("DELETE users;", "FROM"),
+    ("DELETE FROM users WHERE id >= 1;", "'='"),
 ]
 
 
@@ -329,6 +335,45 @@ def multi_row_invalid_row_saves_nothing(env):
 
 
 # ---------- A7: 빈 입력·빈 테이블·파일 오류 ----------
+
+# ---------- UPDATE·DELETE ----------
+
+@test
+def update_delete_then_select(env):
+    expect_ok(env.run(FOUR_PEOPLE +
+                      "UPDATE users SET age = 26 WHERE age = 25;\n"
+                      "UPDATE users SET name = '지영''s', age = 31 WHERE id = 2;\n"
+                      "UPDATE users SET age = 1 WHERE id = 99;\n"
+                      "DELETE FROM users WHERE id = 3;\n"
+                      "DELETE FROM users WHERE age = 200;\n"
+                      "SELECT * FROM users;\n"),
+              b"INSERT 1\n" * 4 + b"UPDATE 2\nUPDATE 1\nUPDATE 0\nDELETE 1\nDELETE 0\n" + HEADER +
+              u("1\t민수\t26\n2\t지영's\t31\n4\t현우\t40\n"))
+    eq(env.data(), u("1\t민수\t26\n2\t지영's\t31\n4\t현우\t40\n"), "저장 파일")
+    assert not os.path.exists(env.data_file + ".tmp"), "임시 파일이 남음"
+
+    # 재시작해도 변경이 남고, id 조회는 새 파일 기준이다.
+    expect_ok(env.run("SELECT * FROM users WHERE id = 4;\nSELECT * FROM users WHERE id = 3;\n"),
+              HEADER + u("4\t현우\t40\n") + HEADER)
+
+
+@test
+def delete_all_then_insert(env):
+    expect_ok(env.run(TWO_INSERTS + "DELETE FROM users;\n"
+                      "INSERT INTO users (name, age) VALUES ('새', 1);\nSELECT * FROM users;\n"),
+              b"INSERT 1\nINSERT 1\nDELETE 2\nINSERT 1\n" + HEADER + u("3\t새\t1\n"))
+
+
+@test
+def update_failure_keeps_earlier_statements(env):
+    # 두 번째 문장(UPDATE) 값 오류: 첫 UPDATE는 남고, 실패한 UPDATE는 아무것도 바꾸지 않는다.
+    expect_fail(env.run(TWO_INSERTS +
+                        "UPDATE users SET age = 99 WHERE id = 1;\n"
+                        "UPDATE users SET age = 151;\n"
+                        "DELETE FROM users;\n"),
+                "문장 4", "범위", stdout=b"INSERT 1\nINSERT 1\nUPDATE 1\n")
+    eq(env.data(), u("1\t민수\t99\n2\tO'Brien\t30\n"), "저장 파일")
+
 
 @test
 def a7_empty_and_blank_sql(env):

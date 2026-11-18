@@ -14,6 +14,8 @@
 #include <string.h>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <direct.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -31,6 +33,7 @@
 #endif
 
 #define TABLE_FILE "users.tsv"
+#define TEMP_SUFFIX ".tmp" /* table_rewrite가 새 내용을 먼저 쓰는 파일: users.tsv.tmp */
 #define ID_MAX_DIGITS 19  /* INT64_MAX = 9223372036854775807 */
 #define AGE_MAX_DIGITS 3
 /* 가장 긴 레코드: 19 + 1 + 255 + 1 + 3 = 279바이트. 넉넉히 잡고 넘으면 손상으로 본다. */
@@ -44,12 +47,14 @@ struct Table {
     int64_t last_id; /* 파일에 있는 최대 ID. 빈 테이블이면 0 */
     BPTree index;
     bool write_failed;
+    TableReader *readers; /* 열린 reader 목록. table_rewrite가 파일을 바꾼 뒤 다시 연다 */
 };
 
 /* 같은 Table의 인덱스를 공유하고, 파일 위치만 따로 갖는 읽기 핸들. */
 struct TableReader {
     Table *table;
-    FILE *fp; /* "rb": 읽기 전에 항상 위치를 다시 잡는다 */
+    FILE *fp; /* "rb": 읽기 전에 항상 위치를 다시 잡는다. 다시 열기에 실패하면 NULL */
+    TableReader *next;
 };
 
 /* ---------- 레코드 읽기 ---------- */
@@ -346,6 +351,8 @@ int table_reader_open(Table *t, TableReader **out, DbError *err) {
         free(r);
         return -1;
     }
+    r->next = t->readers;
+    t->readers = r;
     *out = r;
     return 0;
 }
@@ -363,11 +370,18 @@ int table_reader_find_id(TableReader *r, int64_t id, RowFn fn, void *ctx, DbErro
 
 int table_reader_close(TableReader *r, DbError *err) {
     int rc;
+    TableReader **link;
 
     if (r == NULL) {
         return 0;
     }
-    rc = fclose(r->fp);
+    for (link = &r->table->readers; *link != NULL; link = &(*link)->next) {
+        if (*link == r) {
+            *link = r->next;
+            break;
+        }
+    }
+    rc = r->fp != NULL ? fclose(r->fp) : 0;
     if (rc != 0) {
         db_error_set(err, "데이터 파일 닫기 실패: %s (%s)", r->table->path, strerror(errno));
     }
@@ -544,13 +558,249 @@ out:
     return rc;
 }
 
+/* ---------- UPDATE·DELETE: 임시 파일에 다시 쓰고 교체 ---------- */
+
+typedef enum {
+    REWRITE_OK,
+    REWRITE_CALLBACK_FAILED,
+    REWRITE_UNSTORABLE,
+    REWRITE_NO_MEMORY,
+    REWRITE_WRITE_FAILED
+} RewriteFailure;
+
+typedef struct {
+    RewriteFn fn;
+    void *ctx;
+    FILE *out;
+    BPTree index; /* 새 파일 기준 인덱스. 교체에 성공해야 Table로 옮긴다 */
+    int64_t offset;
+    size_t changed;
+    RewriteFailure failure;
+    int saved_errno;
+} RewriteState;
+
+/* scan_rows 콜백: 행 하나의 결정을 받아 임시 파일에 쓰고 새 인덱스에 키를 넣는다. */
+static int rewrite_row(const Row *row, void *opaque) {
+    RewriteState *s = opaque;
+    RowEdit edit = {REWRITE_KEEP, NULL, 0};
+    AppendRow out;
+    BPTreeNode *leaf;
+    int w;
+
+    if (s->fn(row, s->ctx, &edit) != 0) {
+        s->failure = REWRITE_CALLBACK_FAILED;
+        return -1;
+    }
+    switch (edit.action) {
+    case REWRITE_DELETE:
+        s->changed++;
+        return 0;
+    case REWRITE_REPLACE:
+        out.name = edit.name;
+        out.age = edit.age;
+        if (!storable(&out)) {
+            s->failure = REWRITE_UNSTORABLE;
+            return -1;
+        }
+        s->changed++;
+        break;
+    case REWRITE_KEEP:
+        out.name = row->name;
+        out.age = row->age;
+        break;
+    default:
+        s->failure = REWRITE_CALLBACK_FAILED;
+        return -1;
+    }
+    leaf = bptree_reserve_append(&s->index);
+    if (leaf == NULL) {
+        s->failure = REWRITE_NO_MEMORY;
+        return -1;
+    }
+    /* 기존 줄은 정규형이므로 KEEP 행은 원래 줄과 같은 바이트로 다시 쓰인다. */
+    w = fprintf(s->out, "%" PRId64 "\t%s\t%d\n", row->id, out.name, out.age);
+    if (w < 0) {
+        s->failure = REWRITE_WRITE_FAILED;
+        s->saved_errno = errno;
+        return -1;
+    }
+    bptree_append(leaf, row->id, s->offset);
+    s->offset += w;
+    return 0;
+}
+
+/* from을 to로 바꾼다. 이미 있는 to는 대체한다. */
+static int replace_file(const char *from, const char *to) {
+#ifdef _WIN32
+    /* Windows의 rename은 대상이 있으면 실패한다. MoveFileExA는 errno를 남기지 않으므로
+     * 다른 프로세스가 파일을 연 경우 같은 대표 원인으로 보고한다. */
+    if (MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return 0;
+    }
+    errno = EACCES;
+    return -1;
+#else
+    return rename(from, to);
+#endif
+}
+
+/* Table과 모든 reader의 파일을 path로 다시 연다. 하나라도 실패하면 Table을 쓸 수 없게 한다. */
+static bool reopen_files(Table *t) {
+    bool ok = true;
+
+    t->fp = fopen(t->path, "a+b");
+    if (t->fp == NULL) {
+        ok = false;
+    }
+    for (TableReader *r = t->readers; r != NULL; r = r->next) {
+        r->fp = fopen(t->path, "rb");
+        if (r->fp == NULL) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        t->write_failed = true;
+    }
+    return ok;
+}
+
+/* 열린 파일을 모두 닫는다. Windows는 열린 파일을 대체할 수 없고, POSIX에서도 reader가
+ * 옛 파일을 계속 읽지 않도록 다시 열어야 한다. 쓰기는 매번 flush했으므로 닫기 오류는 무시한다. */
+static void close_files(Table *t) {
+    if (t->fp != NULL) {
+        (void)fclose(t->fp);
+        t->fp = NULL;
+    }
+    for (TableReader *r = t->readers; r != NULL; r = r->next) {
+        if (r->fp != NULL) {
+            (void)fclose(r->fp);
+            r->fp = NULL;
+        }
+    }
+}
+
+/*
+ * 순서:
+ *   1. 기존 파일을 처음부터 검증하며 읽고, 행마다 fn의 결정대로 임시 파일에 쓴다.
+ *      새 인덱스도 같은 순서로 만든다(ID는 그대로라 계속 증가한다).
+ *   2. 바뀐 행이 없으면 임시 파일을 지우고 끝낸다. 파일은 그대로다.
+ *   3. 임시 파일을 flush·close한 뒤 열린 파일을 모두 닫고 원래 파일을 대체한다.
+ *   4. 인덱스를 새 것으로 바꾸고 새 파일을 다시 연다.
+ * 3의 대체 전까지 실패하면 원래 파일과 인덱스는 그대로다. 전원 장애 대비 fsync는 하지 않는다
+ * (추가 쓰기와 같은 범위).
+ */
+int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *err) {
+    RewriteState s;
+    char *tmp_path = NULL;
+    size_t tmp_len;
+    bool replaced = false;
+    int rc = -1;
+
+    if (changed != NULL) {
+        *changed = 0;
+    }
+    if (!table_usable(t, err)) {
+        return -1;
+    }
+    if (fn == NULL) {
+        db_error_set(err, "행 처리 함수가 없습니다");
+        return -1;
+    }
+    memset(&s, 0, sizeof s);
+    s.fn = fn;
+    s.ctx = ctx;
+
+    tmp_len = strlen(t->path) + sizeof TEMP_SUFFIX;
+    tmp_path = malloc(tmp_len);
+    if (tmp_path == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
+        return -1;
+    }
+    snprintf(tmp_path, tmp_len, "%s%s", t->path, TEMP_SUFFIX);
+    s.out = fopen(tmp_path, "wb");
+    if (s.out == NULL) {
+        db_error_set(err, "임시 파일을 만들 수 없습니다: %s (%s)", tmp_path, strerror(errno));
+        free(tmp_path);
+        return -1;
+    }
+
+    if (scan_rows(t, t->fp, rewrite_row, &s, false, err) != 0) {
+        switch (s.failure) {
+        case REWRITE_OK: /* 기존 파일 손상·읽기 오류: scan_rows가 남긴 메시지를 쓴다 */
+            break;
+        case REWRITE_CALLBACK_FAILED:
+            db_error_set(err, "행 처리에 실패했습니다");
+            break;
+        case REWRITE_UNSTORABLE:
+            db_error_set(err, "저장할 수 없는 레코드입니다");
+            break;
+        case REWRITE_NO_MEMORY:
+            db_error_set(err, "ID 인덱스를 위한 메모리가 부족합니다");
+            break;
+        case REWRITE_WRITE_FAILED:
+            db_error_set(err, "임시 파일 쓰기 실패: %s (%s)", tmp_path, strerror(s.saved_errno));
+            break;
+        }
+        goto out;
+    }
+    if (s.changed == 0) {
+        rc = 0;
+        goto out;
+    }
+    if (fflush(s.out) != 0 || ferror(s.out)) {
+        db_error_set(err, "임시 파일 쓰기 실패: %s (%s)", tmp_path, strerror(errno));
+        goto out;
+    }
+    if (fclose(s.out) != 0) {
+        s.out = NULL;
+        db_error_set(err, "임시 파일 닫기 실패: %s (%s)", tmp_path, strerror(errno));
+        goto out;
+    }
+    s.out = NULL;
+
+    close_files(t);
+    if (replace_file(tmp_path, t->path) != 0) {
+        int saved_errno = errno;
+        /* 원래 파일은 그대로다. 다시 열지 못하면 reopen_files가 Table을 막는다. */
+        if (reopen_files(t)) {
+            db_error_set(err, "데이터 파일 교체 실패: %s (%s)", t->path, strerror(saved_errno));
+        } else {
+            db_error_set(err, "데이터 파일 교체 실패 뒤 다시 열지 못했습니다: %s", t->path);
+        }
+        goto out;
+    }
+    replaced = true;
+    bptree_clear(&t->index);
+    t->index = s.index;
+    s.index.root = NULL;
+    if (changed != NULL) {
+        *changed = s.changed;
+    }
+    if (!reopen_files(t)) {
+        db_error_set(err, "변경한 데이터 파일을 다시 열지 못했습니다: %s (%s)", t->path, strerror(errno));
+        goto out;
+    }
+    rc = 0;
+
+out:
+    if (s.out != NULL) {
+        (void)fclose(s.out);
+    }
+    if (!replaced) {
+        (void)remove(tmp_path);
+    }
+    bptree_clear(&s.index);
+    free(tmp_path);
+    return rc;
+}
+
 int table_close(Table *t, DbError *err) {
     int rc;
 
     if (t == NULL) {
         return 0;
     }
-    rc = fclose(t->fp);
+    rc = t->fp != NULL ? fclose(t->fp) : 0;
     if (rc != 0) {
         db_error_set(err, "데이터 파일 닫기 실패: %s (%s)", t->path, strerror(errno));
     }

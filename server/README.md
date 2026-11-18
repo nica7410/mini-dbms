@@ -100,6 +100,24 @@ curl -sS http://127.0.0.1:8080/query \
 }
 ```
 
+UPDATE·DELETE는 바꾸거나 지운 행 수를 `affected_rows`로 돌려준다. 일치하는 행이 없어도 성공(`affected_rows: 0`)이다.
+
+```json
+{"sql":"UPDATE users SET age = 26 WHERE id = 1;"}
+```
+
+```json
+{"ok": true, "request_id": "4", "type": "update", "affected_rows": 1, "write_outcome": "applied"}
+```
+
+```json
+{"sql":"DELETE FROM users WHERE age = 30;"}
+```
+
+```json
+{"ok": true, "request_id": "5", "type": "delete", "affected_rows": 1, "write_outcome": "applied"}
+```
+
 `id`, `inserted_id`, `last_inserted_id`는 JSON 문자열이다. 기존 엔진의 64비트 ID를 JavaScript 클라이언트에서 정밀도 손실 없이 전달하기 위한 계약이다. `request_id`도 문자열이며 서버 프로세스 안에서 증가한다. 재시작 사이에 유일한 ID나 중복 실행 방지 키는 아니다.
 
 지원 SQL은 기존 CLI와 같다.
@@ -111,6 +129,10 @@ curl -sS http://127.0.0.1:8080/query \
 | `SELECT * FROM users WHERE id = 1;` | B+ 트리를 통한 ID 검색 |
 | `SELECT * FROM users WHERE age = 25;` | TSV 순차 탐색 |
 | `SELECT * FROM users;` | 전체 순차 탐색, 결과 상한 적용 |
+| `UPDATE users SET age = 26 WHERE id = 1;` | 조건에 맞는 행의 name·age를 바꾼다. SET은 `name`, `age` 중 하나 이상, id는 바꿀 수 없음 |
+| `DELETE FROM users WHERE age = 30;` | 조건에 맞는 행을 지운다 |
+
+UPDATE·DELETE의 WHERE는 SELECT와 같다(`id = 정수` 또는 `age = 정수` 하나, 생략하면 모든 행). 둘 다 파일 전체를 임시 파일(`users.tsv.tmp`)에 다시 쓴 뒤 원래 파일과 바꾸므로 비용은 조건과 관계없이 O(행 수)이고, 그동안 다른 SQL은 기다린다. 교체 전에 실패하면 아무것도 바뀌지 않는다. 지운 최대 ID는 서버가 실행되는 동안 다시 쓰지 않지만, 재시작하면 파일에 남은 최대 ID 다음부터 부여한다.
 
 이름은 1~255바이트이며 탭·개행을 포함할 수 없다. 나이는 0~150이다. SQL 문자열의 작은따옴표는 기존 SQL 규칙에 따라 두 번 써서 표현한다. 예: `'O''Brien'`.
 
@@ -135,30 +157,32 @@ curl -sS http://127.0.0.1:8080/metrics
 | 400 | `INVALID_SQL` | 문법 오류, 빈 입력, 다중 문장, NUL 등 |
 | 413 | `SQL_TOO_LARGE` 또는 `HTTP_ERROR` | SQL 또는 HTTP 본문 크기 초과 |
 | 415 | `CONTENT_TYPE` | `application/json`이 아닌 요청 |
-| 422 | `INVALID_VALUES` | 기존 스키마 범위에 맞지 않는 INSERT 값 |
+| 422 | `INVALID_VALUES` | 기존 스키마 범위에 맞지 않는 INSERT·UPDATE 값 |
 | 422 | `RESULT_TOO_LARGE` | SELECT 행 수·응답 크기 상한 초과 |
 | 500 | `STORAGE_ERROR` | 기존 엔진의 저장·읽기 실패 |
 | 500 | `INVALID_STORED_TEXT` | 기존 파일의 이름을 UTF-8 JSON으로 반환할 수 없음 |
 | 500 | `INTERNAL_ERROR` | 요청 처리 중 내부 실패 |
 | 503 | `QUEUE_FULL` | 요청이 들어갈 큐(읽기 또는 쓰기)의 대기 작업 수 또는 대기 요청 바이트 상한 초과 |
-| 503 | `QUEUE_TIMEOUT` | SQL 실행 전 대기 시간 초과. worker가 작업을 꺼낼 때 검사하고, INSERT는 쓰기 잠금을 얻은 뒤 한 번 더 검사한다. 어느 경우든 기록하지 않는다(`write_outcome: not_started`) |
+| 503 | `QUEUE_TIMEOUT` | SQL 실행 전 대기 시간 초과. worker가 작업을 꺼낼 때 검사하고, INSERT·UPDATE·DELETE는 쓰기 잠금을 얻은 뒤 한 번 더 검사한다. 어느 경우든 기록하지 않는다(`write_outcome: not_started`) |
 | 503 | `SHUTTING_DOWN` | 종료 중이라 신규 작업을 받지 않음 |
 | 503 | `DATABASE_UNAVAILABLE` | 저장 상태 확인과 재시작이 필요한 엔진 상태 |
 
 `/query`의 503 오류 응답에는 `Retry-After: 1`이 포함된다. 최대 연결 수나 클라이언트 연결 종료처럼 HTTP 응답 자체를 전달할 수 없는 상황은 별개다.
 
-### INSERT 결과와 재시도
+### 쓰기 결과와 재시도
 
 `write_outcome`은 필요한 응답에 다음 값으로 포함된다.
 
 | 값 | 의미 |
 |---|---|
-| `applied` | C 엔진의 INSERT 성공 콜백을 확인함. 이후 응답 생성·전송 실패로 되돌리지 않음 |
+| `applied` | C 엔진의 INSERT 성공 콜백, 또는 UPDATE·DELETE 완료(0행 포함)를 확인함. 이후 응답 생성·전송 실패로 되돌리지 않음. UPDATE·DELETE가 파일을 바꾼 뒤 다시 열지 못하면 `STORAGE_ERROR`와 함께 `applied`, `affected_rows`를 넣고 엔진은 사용 불가 상태가 됨 |
 | `not_started` | 큐 수락 실패, 종료 거절, 대기 만료 등으로 SQL을 시작하지 않음 |
 | `unknown` | 저장 또는 내부 실패 때문에 이 응답만으로 적용 여부를 확정할 수 없음 |
 | `partial` | 여러 행 INSERT가 쓰는 도중 저장에 실패함. 응답의 `inserted_id`~`last_inserted_id`(`affected_rows`개)는 기록됨. 그다음 행은 `unknown`과 같고, 나머지 행은 시작하지 않음. 응답 생성 중 예외(`INTERNAL_ERROR`)가 나도 같은 범위 필드를 넣음 |
 
-클라이언트가 응답을 받지 못했다고 INSERT가 실행되지 않은 것은 아니다. 이 API는 idempotency key나 자동 rollback을 제공하지 않으므로 확인 없이 INSERT를 재전송하면 중복 행이 생길 수 있다. `applied`는 `fsync`를 통한 전원 장애 내구성 보장과도 다르다.
+클라이언트가 응답을 받지 못했다고 INSERT가 실행되지 않은 것은 아니다. 이 API는 idempotency key나 자동 rollback을 제공하지 않으므로 확인 없이 INSERT를 재전송하면 중복 행이 생길 수 있다. `applied`는 `fsync`를 통한 전원 장애 내구성 보장과도 다르다. UPDATE(SET 값이 상수)와 DELETE는 같은 문장을 다시 보내도 결과가 같다.
+
+`STORAGE_ERROR`가 난 UPDATE·DELETE의 `unknown`은 대개 파일 교체 전 실패(아무것도 바뀌지 않음)지만, 응답만으로는 구분하지 않는다.
 
 ## 실행 옵션
 
@@ -172,31 +196,31 @@ curl -sS http://127.0.0.1:8080/metrics
 | `--host` | `127.0.0.1` | 수신 주소 |
 | `--port` | `8080` | TCP 포트 |
 | `--workers` | `4` | 읽기 큐를 처리하는 SQL worker 수 |
-| `--write-workers` | `2` | 쓰기 큐(INSERT)를 처리하는 SQL worker 수 |
+| `--write-workers` | `2` | 쓰기 큐(INSERT·UPDATE·DELETE)를 처리하는 SQL worker 수 |
 | `--io-threads` | `2` | HTTP event loop 수 |
 | `--queue-capacity` | `256` | 큐마다 적용하는 대기 SQL 작업 수 상한 |
 | `--queue-bytes` | `16777216` | 큐마다 적용하는 대기 작업의 원본 JSON 본문 바이트 합 상한 |
 | `--max-sql-bytes` | `65536` | 디코딩한 SQL의 UTF-8 바이트 상한 |
 | `--max-rows` | `10000` | SELECT 결과 행 수 상한 |
 | `--max-result-bytes` | `8388608` | 결과 수집 예산 및 최종 JSON 크기 상한 |
-| `--queue-timeout-ms` | `5000` | SQL 실행 전 대기 만료 기준. INSERT는 쓰기 잠금 대기도 포함한다 |
+| `--queue-timeout-ms` | `5000` | SQL 실행 전 대기 만료 기준. INSERT·UPDATE·DELETE는 쓰기 잠금 대기도 포함한다 |
 | `--max-connections` | `1024` | HTTP 연결 수 상한 |
 
 숫자 옵션은 양수다. 포트는 65535 이하, 읽기·쓰기 worker와 I/O thread 수는 각각 256 이하, SQL 크기는 16 MiB 이하, 결과 크기는 512바이트 이상, 대기 만료는 1일 이하를 허용한다.
 
-요청은 HTTP I/O 스레드에서 SQL의 첫 키워드만 보고 나눈다. `INSERT`로 시작하면 쓰기 큐, 그 밖의 모든 요청(SELECT, 문법 오류, 빈 SQL)은 읽기 큐로 간다. worker는 지금처럼 SQL 전체를 다시 파싱하므로 분류는 결과에 영향을 주지 않는다. 큐가 둘이라 대기 메모리 상한은 옵션 값의 두 배(기본 32 MiB)다.
+요청은 HTTP I/O 스레드에서 SQL의 첫 키워드만 보고 나눈다. `INSERT`·`UPDATE`·`DELETE`로 시작하면 쓰기 큐, 그 밖의 모든 요청(SELECT, 문법 오류, 빈 SQL)은 읽기 큐로 간다. worker는 지금처럼 SQL 전체를 다시 파싱하므로 분류는 결과에 영향을 주지 않는다. 큐가 둘이라 대기 메모리 상한은 옵션 값의 두 배(기본 32 MiB)다.
 
 큐 상한은 이미 실행 중인 작업을 제외한다. HTTP 수신 버퍼, JSON 객체, 실행 중인 결과, 응답 전송 버퍼까지 합친 프로세스 전체 메모리 상한은 아니다. SELECT 결과는 보수적인 크기 예산으로 수집하므로 최종 JSON 크기 상한에 도달하기 전에 거절될 수도 있다. 상한을 넘긴 결과를 성공 응답으로 일부만 반환하지 않는다.
 
 HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한도를 초과하면 연결이 종료될 수 있으며, SQL 큐의 `QUEUE_FULL` JSON 응답과는 별개다.
 
-`--queue-timeout-ms`는 실행 중인 SQL을 중단하는 timeout이 아니다. INSERT는 쓰기 잠금을 기다리는 동안 만료되더라도 잠금을 얻은 뒤에야 만료를 확인한다(대기를 중간에 끊지 않는다). SELECT의 잠금 대기와 모든 파일 I/O에는 이 시간 제한이 적용되지 않는다.
+`--queue-timeout-ms`는 실행 중인 SQL을 중단하는 timeout이 아니다. 쓰기 문장은 쓰기 잠금을 기다리는 동안 만료되더라도 잠금을 얻은 뒤에야 만료를 확인한다(대기를 중간에 끊지 않는다). SELECT의 잠금 대기와 모든 파일 I/O에는 이 시간 제한이 적용되지 않는다.
 
 ## 병렬 처리와 제한
 
 - SELECT는 worker마다 따로 연 읽기 핸들(`TableReader`)로 실행하므로 병렬로 실행할 수 있다. 같은 `FILE*`를 여러 thread가 공유하지 않는다.
-- B+ 트리 인덱스는 하나를 모든 worker가 공유한다. 공유 gate 아래에서만 읽고, INSERT의 배타 gate 아래에서만 바뀐다. 그래서 INSERT 직후 어느 worker에서 조회해도 새 행이 바로 보인다.
-- INSERT는 직렬화하며, INSERT 실행 중에는 SELECT를 실행하지 않는다.
+- B+ 트리 인덱스는 하나를 모든 worker가 공유한다. 공유 gate 아래에서만 읽고, INSERT·UPDATE·DELETE의 배타 gate 아래에서만 바뀐다. 그래서 쓰기 직후 어느 worker에서 조회해도 결과가 바로 보인다.
+- 쓰기 문장은 직렬화하며, 실행 중에는 SELECT를 실행하지 않는다. UPDATE·DELETE는 파일을 바꾼 뒤 모든 worker의 읽기 핸들을 새 파일로 다시 연다(배타 gate 아래라 읽는 worker가 없다).
 - 인덱스는 시작할 때 한 번만 구축한다. worker 수를 늘려도 인덱스 메모리와 시작 시간은 늘지 않는다.
 - 단일 SELECT의 탐색 자체를 여러 thread로 분할하지 않는다. MVCC, 트랜잭션, UPDATE/DELETE, 페이지네이션은 제공하지 않는다.
 - TSV 쓰기는 기존 엔진의 `fflush` 계약을 사용한다. WAL·`fsync`·crash recovery를 추가한 것은 아니다.
@@ -207,7 +231,7 @@ Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다
 
 `/metrics`의 `pool`은 두 큐의 합계다(`peak_active`는 각 큐 최댓값의 합, `max_queue_wait_us`는 둘 중 큰 값). 큐별 값은 `pools.read`, `pools.write`에 같은 필드로 있다. `expired`도 큐별로 센다.
 
-`/metrics`의 `request_kinds`는 worker가 처리한 요청을 `insert`, `select`, `other`로 나눠 `count`, `queue_wait_us`(큐 대기 합계), `max_queue_wait_us`, `total_us`(큐 진입부터 응답을 HTTP 루프에 넘길 때까지의 합계)를 제공한다. 종류는 worker가 SQL을 파싱한 뒤에 정해진다. 큐에서 만료된 요청, 파싱 실패, 처리 중 예외는 `other`다. 큐에 들어가지 못한 요청(`QUEUE_FULL` 등)은 세지 않는다.
+`/metrics`의 `request_kinds`는 worker가 처리한 요청을 `insert`, `select`, `update`, `delete`, `other`로 나눠 `count`, `queue_wait_us`(큐 대기 합계), `max_queue_wait_us`, `total_us`(큐 진입부터 응답을 HTTP 루프에 넘길 때까지의 합계)를 제공한다. 종류는 worker가 SQL을 파싱한 뒤에 정해진다. 큐에서 만료된 요청, 파싱 실패, 처리 중 예외는 `other`다. 큐에 들어가지 못한 요청(`QUEUE_FULL` 등)은 세지 않는다.
 
 ## 종료
 

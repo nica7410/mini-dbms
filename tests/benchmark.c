@@ -133,7 +133,7 @@ static int run_multi_insert(const char *dir, DbError *err) {
 
 static int measure_select(Table *table, const char *sql, int repeats, double *us, DbError *err) {
     int count = 0;
-    ResultSink sink = {NULL, count_target, &count};
+    ResultSink sink = {NULL, count_target, &count, NULL};
     size_t pos = 0;
     Statement st;
     double start;
