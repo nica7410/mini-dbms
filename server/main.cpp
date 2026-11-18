@@ -406,15 +406,17 @@ int serve(const Options &options) {
     engine_options.max_rows = options.max_rows;
     engine_options.max_result_bytes = options.max_result_bytes;
     minidb::Engine engine(engine_options);
+    // Everything a task touches is declared before the pools, so it outlives the
+    // drain in ~ThreadPool even if serve() unwinds by exception.
+    std::atomic<std::uint64_t> read_expired{0};
+    std::atomic<std::uint64_t> write_expired{0};
+    RequestKindMetrics kinds;
     // INSERT and SELECT wait in separate queues so neither waits behind the other's
     // backlog. Write workers take engine worker indices after the read workers.
     minidb::ThreadPool read_pool(options.workers, options.queue_capacity, options.queue_bytes);
     minidb::ThreadPool write_pool(options.write_workers, options.queue_capacity, options.queue_bytes);
     std::atomic<bool> stopping{false};
     std::atomic<std::uint64_t> next_request{1};
-    std::atomic<std::uint64_t> read_expired{0};
-    std::atomic<std::uint64_t> write_expired{0};
-    RequestKindMetrics kinds;
     auto &app = drogon::app();
     // Account for worst-case JSON escaping of an otherwise valid SQL string.
     const std::size_t body_limit = options.max_sql_bytes * 6 + 1024;

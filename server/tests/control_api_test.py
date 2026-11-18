@@ -65,7 +65,11 @@ class ControlledApiTest(unittest.TestCase):
                             f"INSERT INTO users (name, age) VALUES ('pending-{n}', 1);") for n in range(3)]
                         # One INSERT waits for the write lock held off by the scan;
                         # the other two wait in the write queue.
-                        await_state(lambda: server.metrics()["pools"]["write"]["queued"] == 2)
+                        def settled():
+                            write = server.metrics()["pools"]["write"]
+                            # queued == 2 alone can be seen before the worker takes the first.
+                            return (write["queued"], write["active"], write["accepted"]) == (2, 1, 3)
+                        await_state(settled)
                         metrics = server.metrics()
                         write = metrics["pools"]["write"]
                         self.assertEqual((write["active"], write["accepted"], write["completed"]), (1, 3, 0))
@@ -140,7 +144,7 @@ class ControlledApiTest(unittest.TestCase):
                         # Give the write worker time to parse and block on the write
                         # lock; the writer-preferred lock then admits it before any
                         # queued scan reaches the lock.
-                        settle_at = time.monotonic() + 0.2
+                        settle_at = time.monotonic() + 0.5
                         await_state(lambda: time.monotonic() >= settle_at)
                         self.assertEqual(server.metrics()["pools"]["read"]["queued"], 2)
                         control.release()
