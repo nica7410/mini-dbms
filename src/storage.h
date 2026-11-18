@@ -26,7 +26,9 @@ typedef int (*RowFn)(const Row *row, void *ctx);
 /* 반환 규칙: 0 성공, -1 실패(err에 원인) */
 
 /* data_dir/users.tsv를 연다. 없으면 만든다(data_dir 한 단계 포함).
- * 기존 레코드 전체를 한 번 검증해 최대 ID와 메모리 인덱스를 복원한다. */
+ * 기존 레코드 전체를 한 번 검증해 최대 ID와 메모리 인덱스를 복원한다.
+ * data_dir/users.meta(지운 최대 ID 보존)가 있으면 그 값과 파일의 최대 ID 중 큰 쪽을 최대 ID로 쓴다.
+ * users.meta 형식이 틀리면 실패한다. */
 int table_open(const char *data_dir, Table **out, DbError *err);
 
 /* 다음 ID(최대 ID + 1)를 부여해 레코드 한 건을 파일 끝에 추가한다. */
@@ -73,12 +75,18 @@ typedef int (*RewriteFn)(const Row *row, void *ctx, RowEdit *edit);
  *   *changed > 0 : 파일 교체는 끝났지만 다시 열지 못했거나 교체를 디스크에 기록(폴더 fsync)하지
  *                  못했다. 변경은 적용됐고 Table은 더 쓸 수 없다.
  * 임시 파일은 fsync한 뒤에만 원래 파일을 대체하므로, 전원 장애 뒤 파일은 대체 전이나 후 중 하나다.
- * 부여한 최대 ID(다음 INSERT의 ID 기준)는 줄지 않는다. 단, 재시작하면 파일에 남은 최대 ID에서
- * 다시 계산하므로 끝쪽 ID를 지운 뒤 재시작하면 그 ID가 다시 쓰일 수 있다.
+ * 부여한 최대 ID(다음 INSERT의 ID 기준)는 줄지 않는다. 최대 ID 행을 지우면 파일을 바꾸기 전에
+ * 그 값을 users.meta에 기록하므로 재시작 뒤에도 지운 ID를 다시 부여하지 않는다.
  * 열려 있는 TableReader의 파일도 새 파일로 다시 연다. 따라서 reader 조회·열기·닫기와 동시에
  * 실행하면 안 된다(table_append_rows와 같은 규칙).
  */
 int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *err);
+
+#ifdef MINIDB_TEST_HOOKS
+/* 테스트 빌드 전용(-DMINIDB_TEST_HOOKS). 1이면 다음 파일 fsync, 2이면 다음 폴더 fsync를 EIO로
+ * 한 번 실패시키고 0으로 돌아간다. 제품 빌드에는 없다. */
+extern int storage_test_fail_sync;
+#endif
 
 /* 저장 순서대로 레코드를 하나씩 읽어 fn을 호출한다. fn이 NULL이면 검증만 한다. */
 int table_scan(Table *t, RowFn fn, void *ctx, DbError *err);

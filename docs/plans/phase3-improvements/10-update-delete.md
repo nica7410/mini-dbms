@@ -45,7 +45,7 @@ DELETE FROM users [WHERE id|age = 정수];
 
 ### ID 재사용
 
-`last_id`는 줄이지 않으므로 같은 실행 안에서는 지운 최대 ID를 다시 쓰지 않는다. 재시작하면 기존 규칙(파일의 최대 ID + 1)으로 다시 계산하므로 끝쪽 ID를 지운 뒤 재시작하면 그 ID가 다시 쓰인다. 최대 ID를 따로 저장하려면 파일 형식이나 보조 파일이 필요해 이번 범위에서 제외했다. 테스트(`test_executor_update_delete`)가 이 동작을 고정한다.
+`last_id`는 줄이지 않으므로 같은 실행 안에서는 지운 최대 ID를 다시 쓰지 않는다. 재시작하면 기존 규칙(파일의 최대 ID + 1)으로 다시 계산하므로 끝쪽 ID를 지운 뒤 재시작하면 그 ID가 다시 쓰인다. 최대 ID를 따로 저장하려면 파일 형식이나 보조 파일이 필요해 이번 범위에서 제외했다. 테스트(`test_executor_update_delete`)가 이 동작을 고정한다. **2026-11-18 [13번](13-persist-max-id.md)에서 `users.meta`로 해결했다.** 이제 재시작 뒤에도 다시 쓰지 않는다.
 
 ## 변경 파일
 
@@ -89,7 +89,7 @@ DELETE FROM users [WHERE id|age = 정수];
 
 - Windows는 MinGW-w64 교차 빌드로만 확인했다. README의 TDM-GCC `mingw32-make test` 경로는 실행하지 않았다.
 - UPDATE·DELETE는 O(행 수)이며 실행 중 다른 SQL을 막는다(`WHERE id = N`의 ID가 없는 경우 제외). 100만 행에서의 지연은 재지 않았다.
-- 재시작 뒤 끝쪽 ID 재사용(위).
+- ~~재시작 뒤 끝쪽 ID 재사용~~ → [13번](13-persist-max-id.md)에서 해결.
 - 교체 직전 열린 파일을 닫는 동안 다른 프로세스가 같은 파일을 열면(Windows) 교체가 실패할 수 있다. 이 경우 원본은 그대로다.
 
 ## 후속: WHERE id 미스 시 파일 읽기 생략 (2026-11-18)
@@ -116,4 +116,4 @@ DELETE FROM users [WHERE id|age = 정수];
   - 컨테이너 `make test`: 경고 0건, 단위 34742개 검사 실패 0, CLI 33개 PASS.
   - 호출 순서: `fsync`·`rename`을 가로채는 `LD_PRELOAD` 도구로 CLI 실행. UPDATE와 DELETE마다 `fsync users.tsv.tmp` → `rename` → `fsync <폴더>` 순서, INSERT와 없는 ID의 DELETE는 `fsync` 없음.
   - Windows: MinGW-w64 `-static` 교차 빌드 경고 0건, 호스트에서 단위 34684개 검사 실패 0, CLI 33개 PASS.
-  - 미실행: `fsync` 실패 주입 테스트(실패 경로는 코드 검토만), 실제 전원 차단 시험, 서버 `ctest`·sanitizer·TSan(서버 코드·잠금 변경 없음).
+  - 미실행: 실제 전원 차단 시험, 서버 `ctest`·sanitizer·TSan(서버 코드·잠금 변경 없음). `fsync` 실패 경로는 [15-A](15-small-followups.md#a-fsync-실패-경로-테스트)에서 테스트로 고정했다.

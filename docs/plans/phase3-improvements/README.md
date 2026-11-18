@@ -2,7 +2,7 @@
 
 작성일: 2026-11-16  
 기준 커밋: `2cccc9b0c6f4a6ea86395d88bf06290d48c3f83a`  
-상태: 1~4번 완료(TSan 포함), 6번 단일 인덱스 전환 완료. 1번은 6번으로 대체됐다. 4번은 공정 gate 후보를 비교했으나 미채택, 현재 쓰기 우선 정책 유지. 3·4번 측정 범위는 [05 최소 검증](05-minimal-verification.md)으로 대체했다.
+상태: 2026-11-18 기준 11·13·15-A·16 완료, 12·14 보류, 15-B TDM-GCC 대기. 1~4번 완료(TSan 포함), 6번 단일 인덱스 전환 완료. 1번은 6번으로 대체됐다. 4번은 공정 gate 후보를 비교했으나 미채택, 현재 쓰기 우선 정책 유지. 3·4번 측정 범위는 [05 최소 검증](05-minimal-verification.md)으로 대체했다.
 
 ## 사용자 정정 — 필수 테스트만 최소 실행
 
@@ -24,6 +24,12 @@
 | 8 | [묶음 쓰기(group commit)](08-group-commit.md) (구현 완료) | 한 문장의 행을 한 번의 `fwrite` + `fflush`로 기록, 실패 시 파일 크기로 기록 행 수 계산, 전후 최소 측정 | 7번 완료. C 저장 API에 함수 추가, 서버·파서·응답 형식은 그대로 |
 | 9 | [읽기·쓰기 큐 분리](09-read-write-queues.md) (완료: 큐 두 개, 쓰기 worker 기본 2) | 문제 후보 P1~P4와 0단계 확인 측정, 분류·쓰기 worker·만료·용량·지표 설계 선택지 D1~D7, 단계별 작업 계획 | 8번 완료. 0단계 측정으로 문제를 확인한 뒤에만 구현한다. gate 정책은 바꾸지 않는다 |
 | 10 | [UPDATE·DELETE](10-update-delete.md) (구현 완료) | 문법, 임시 파일 재작성·교체, reader 재열기, CLI `UPDATE N`/`DELETE N`, HTTP `type: update/delete`·`affected_rows`, 지표 | 9번 완료. 아래 공통 범위의 "UPDATE/DELETE 제외"를 2026-11-18 사용자 지시로 해제한다 |
+| 11 | [UPDATE·DELETE 비용 측정](11-modify-cost.md) (완료: 100만 행 한 행 변경 242 ms 컨테이너 / 536 ms Windows) | `tests/benchmark.c` `modify` 모드, 1만·10만·100만 행 × 문장 4종 3회, 12·14번 진행 판단 | 10번 완료. 제품 코드 변경 없음 |
+| 12 | [두 단계 재작성](12-two-phase-rewrite.md) (보류: 16번 뒤 85 ms) | `table_rewrite_prepare/commit/abort`, 서버 `write_mutex`, 준비 중 SELECT 허용, 훅 기반 엔진 테스트·TSan | 11번 측정에서 100만 행 한 행 변경이 100 ms 초과 |
+| 13 | [최대 ID 보존](13-persist-max-id.md) (완료) | `users.meta`, 끝쪽 DELETE 때만 교체 전 기록, 시작 시 `max(파일, meta)` | 10번 완료. 11·12번과 독립 |
+| 14 | [변경 기록·정리](14-change-log-compaction.md) (조건부 계획, 보류) | `users.log` 추가 기록, 재생, 스캔 병합, compaction | 12번 완료 뒤에도 확정 단계가 100 ms 초과 등 측정 근거와 사용자 확인 |
+| 15 | [작은 후속](15-small-followups.md) (A 완료, B TDM-GCC 대기) | A: fsync 실패 주입 테스트(테스트 빌드 전용), B: TDM-GCC `mingw32-make test` 확인 | 독립. B는 TDM-GCC 설치(사용자) 필요 |
+| 16 | [임시 파일 쓰기 최적화](16-rewrite-copy.md) (완료: 100만 행 한 행 변경 242 → 85 ms 컨테이너, 536 → 146 ms Windows) | 첫 변경 행에서 임시 파일 생성, KEEP 구간 원래 바이트 블록 복사, `scan_rows_spans` | 11번 결과로 사용자가 선택 |
 
 최초 요청에 따라 계획을 저장했고, 이후 사용자의 순차 진행 지시로 구현을 시작했다. 작업별 실행 기록은 각 문서에 남긴다. 커밋·푸시는 해당 시점의 사용자 지시에 따른다.
 

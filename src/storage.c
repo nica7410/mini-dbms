@@ -37,6 +37,9 @@
 
 #define TABLE_FILE "users.tsv"
 #define TEMP_SUFFIX ".tmp" /* table_rewrite가 새 내용을 먼저 쓰는 파일: users.tsv.tmp */
+/* 부여한 최대 ID를 보존하는 보조 파일. 최대 ID 행을 지울 때만 쓴다. 한 줄: "max_id\t<정수>\n" */
+#define META_FILE "users.meta"
+#define META_KEY "max_id\t"
 #define ID_MAX_DIGITS 19  /* INT64_MAX = 9223372036854775807 */
 #define AGE_MAX_DIGITS 3
 /* 가장 긴 레코드: 19 + 1 + 255 + 1 + 3 = 279바이트. 넉넉히 잡고 넘으면 손상으로 본다. */
@@ -47,7 +50,10 @@
 struct Table {
     FILE *fp;      /* "a+b": 읽기는 아무 위치에서, 쓰기는 항상 파일 끝 */
     char *path;
-    int64_t last_id; /* 파일에 있는 최대 ID. 빈 테이블이면 0 */
+    char *meta_path; /* users.meta */
+    int64_t last_id; /* 부여한 최대 ID. 다음 INSERT는 last_id + 1. 빈 새 테이블이면 0.
+                      * 시작할 때 max(파일의 마지막 ID, users.meta 값)으로 정하고, 줄지 않는다. */
+    int64_t meta_id; /* users.meta에 기록된 값. 파일이 없으면 0 */
     BPTree index;
     bool write_failed;
     TableReader *readers; /* 열린 reader 목록. table_rewrite가 파일을 바꾼 뒤 다시 연다 */
@@ -180,8 +186,13 @@ static BPTreeNode *reserve_index_entry(Table *t, DbError *err) {
     return leaf;
 }
 
-/* fp는 t->fp 또는 TableReader의 핸들이다. 위치를 처음으로 옮겨 버퍼와 EOF 상태를 비운다. */
-static int scan_rows(Table *t, FILE *fp, RowFn fn, void *ctx, bool build_index, DbError *err) {
+/* table_rewrite용 행 콜백: 행과 함께 원래 파일 안의 시작 위치와 줄 길이(LF 포함)를 받는다. */
+typedef int (*RowSpanFn)(const Row *row, int64_t offset, int64_t bytes, void *ctx);
+
+/* fp는 t->fp 또는 TableReader의 핸들이다. 위치를 처음으로 옮겨 버퍼와 EOF 상태를 비운다.
+ * span_fn이 있으면 fn 대신 span_fn을 부른다. *end가 NULL이 아니면 마지막 행 뒤의 위치(파일 크기)를 담는다. */
+static int scan_rows_spans(Table *t, FILE *fp, RowFn fn, RowSpanFn span_fn, void *ctx, bool build_index,
+                           int64_t *end, DbError *err) {
     char line[LINE_CAP];
     int64_t lineno = 0;
     int64_t offset = 0;
@@ -215,18 +226,26 @@ static int scan_rows(Table *t, FILE *fp, RowFn fn, void *ctx, bool build_index, 
                 return -1;
             }
             bptree_append(leaf, row.id, offset);
-            offset += (int64_t)len + 1; /* 바이너리 모드에서 LF는 1바이트 */
         }
         prev_id = row.id;
-        if (fn != NULL && fn(&row, ctx) != 0) {
+        if (span_fn != NULL ? span_fn(&row, offset, (int64_t)len + 1, ctx) != 0
+                            : fn != NULL && fn(&row, ctx) != 0) {
             db_error_set(err, "조회 결과 처리에 실패했습니다");
             return -1;
         }
+        offset += (int64_t)len + 1; /* 바이너리 모드에서 LF는 1바이트 */
     }
     if (build_index) {
         t->last_id = prev_id;
     }
+    if (end != NULL) {
+        *end = offset;
+    }
     return 0;
+}
+
+static int scan_rows(Table *t, FILE *fp, RowFn fn, void *ctx, bool build_index, DbError *err) {
+    return scan_rows_spans(t, fp, fn, NULL, ctx, build_index, NULL, err);
 }
 
 static bool table_usable(Table *t, DbError *err) {
@@ -276,6 +295,55 @@ static int find_id_rows(Table *t, FILE *fp, int64_t id, RowFn fn, void *ctx, DbE
     return 0;
 }
 
+/* users.meta를 읽어 t->meta_id에 담고, 파일의 최대 ID보다 크면 last_id로 쓴다.
+ * 파일이 없으면 이전 버전 데이터이거나 최대 ID 행을 지운 적이 없는 것이므로 0으로 둔다.
+ * 형식이 틀리면 실패한다. 조용히 무시하면 지운 ID를 다시 부여할 수 있다. */
+static int read_meta(Table *t, DbError *err) {
+    char buf[64];
+    size_t n;
+    size_t key_len = sizeof META_KEY - 1;
+    size_t digits = 0;
+    int64_t value = 0;
+    int read_error;
+    FILE *fp = fopen(t->meta_path, "rb");
+
+    if (fp == NULL) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        db_error_set(err, "보조 파일을 열 수 없습니다: %s (%s)", t->meta_path, strerror(errno));
+        return -1;
+    }
+    n = fread(buf, 1, sizeof buf - 1, fp);
+    read_error = ferror(fp);
+    fclose(fp);
+    if (read_error) {
+        db_error_set(err, "보조 파일 읽기 실패: %s", t->meta_path);
+        return -1;
+    }
+    buf[n] = '\0';
+    if (n > key_len + 1 && memcmp(buf, META_KEY, key_len) == 0 && buf[n - 1] == '\n') {
+        for (size_t i = key_len; i < n - 1; i++) {
+            int d = buf[i] - '0';
+            if (d < 0 || d > 9 || (digits == 0 && d == 0) || value > (INT64_MAX - d) / 10) {
+                digits = 0;
+                break;
+            }
+            value = value * 10 + d;
+            digits++;
+        }
+    }
+    if (digits == 0 || digits != n - 1 - key_len) {
+        db_error_set(err, "보조 파일 손상: %s: \"max_id\\t<양의 정수>\\n\" 형식이 아닙니다", t->meta_path);
+        return -1;
+    }
+    t->meta_id = value;
+    if (value > t->last_id) {
+        t->last_id = value;
+    }
+    return 0;
+}
+
 /* ---------- 공개 함수 ---------- */
 
 int table_open(const char *data_dir, Table **out, DbError *err) {
@@ -296,6 +364,13 @@ int table_open(const char *data_dir, Table **out, DbError *err) {
         goto fail;
     }
     snprintf(t->path, path_len, "%s/%s", data_dir, TABLE_FILE);
+    path_len = strlen(data_dir) + 1 + strlen(META_FILE) + 1;
+    t->meta_path = malloc(path_len);
+    if (t->meta_path == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
+        goto fail;
+    }
+    snprintf(t->meta_path, path_len, "%s/%s", data_dir, META_FILE);
 
     t->fp = fopen(t->path, "a+b");
     if (t->fp == NULL) {
@@ -311,7 +386,7 @@ int table_open(const char *data_dir, Table **out, DbError *err) {
     }
 
     /* 시작할 때 한 번만 전체를 검증하며 인덱스와 최대 ID를 복원한다. */
-    if (scan_rows(t, t->fp, NULL, NULL, true, err) != 0) {
+    if (scan_rows(t, t->fp, NULL, NULL, true, err) != 0 || read_meta(t, err) != 0) {
         goto fail;
     }
     *out = t;
@@ -323,6 +398,7 @@ fail:
     }
     bptree_clear(&t->index);
     free(t->path);
+    free(t->meta_path);
     free(t);
     return -1;
 }
@@ -568,26 +644,105 @@ typedef enum {
     REWRITE_CALLBACK_FAILED,
     REWRITE_UNSTORABLE,
     REWRITE_NO_MEMORY,
-    REWRITE_WRITE_FAILED
+    REWRITE_WRITE_FAILED,
+    REWRITE_TEMP_OPEN_FAILED,
+    REWRITE_SOURCE_FAILED
 } RewriteFailure;
 
+enum { COPY_BUF_BYTES = 64 * 1024 };
+
+/*
+ * 임시 파일은 첫 변경 행(REPLACE·DELETE)이 나올 때 연다. 변경이 없으면 아무것도 쓰지 않는다.
+ * 바뀌지 않은 행(KEEP)은 형식화하지 않고, 연속 구간을 원래 파일에서 바이트 그대로 복사한다.
+ * 원래 파일은 시작할 때 정규형으로 검증했으므로 다시 형식화한 결과와 같다.
+ */
 typedef struct {
     RewriteFn fn;
     void *ctx;
-    FILE *out;
-    BPTree index; /* 새 파일 기준 인덱스. 교체에 성공해야 Table로 옮긴다 */
-    int64_t offset;
+    const char *src_path;
+    const char *tmp_path;
+    FILE *src;     /* 복사용 원래 파일 읽기 핸들. t->fp는 스캔에 쓰고 있다 */
+    FILE *out;     /* 임시 파일 */
+    char *buf;     /* 복사 버퍼 */
+    int64_t copied; /* 원래 파일에서 여기까지는 임시 파일에 반영했다(복사했거나 건너뛰었다) */
+    BPTree index;  /* 새 파일 기준 인덱스. 교체에 성공해야 Table로 옮긴다 */
+    int64_t offset; /* 새 파일에서 다음 행의 위치 */
+    int64_t last_kept; /* 새 파일의 마지막 ID. 모두 지우면 0 */
     size_t changed;
     RewriteFailure failure;
     int saved_errno;
 } RewriteState;
 
-/* scan_rows 콜백: 행 하나의 결정을 받아 임시 파일에 쓰고 새 인덱스에 키를 넣는다. */
-static int rewrite_row(const Row *row, void *opaque) {
+/* 원래 파일의 [s->copied, to) 구간을 임시 파일에 그대로 복사한다. */
+static int copy_until(RewriteState *s, int64_t to) {
+    if (s->copied >= to) {
+        return 0;
+    }
+    if (file_seek(s->src, s->copied, SEEK_SET) != 0) {
+        s->failure = REWRITE_SOURCE_FAILED;
+        s->saved_errno = errno;
+        return -1;
+    }
+    while (s->copied < to) {
+        size_t want = to - s->copied < COPY_BUF_BYTES ? (size_t)(to - s->copied) : COPY_BUF_BYTES;
+        size_t got = fread(s->buf, 1, want, s->src);
+        if (got != want) {
+            /* 검증한 범위 안이므로 짧게 읽히면 읽기 오류이거나 다른 곳에서 파일을 바꾼 것이다 */
+            s->failure = REWRITE_SOURCE_FAILED;
+            s->saved_errno = ferror(s->src) ? errno : EIO;
+            return -1;
+        }
+        if (fwrite(s->buf, 1, got, s->out) != got) {
+            s->failure = REWRITE_WRITE_FAILED;
+            s->saved_errno = errno;
+            return -1;
+        }
+        s->copied += (int64_t)got;
+    }
+    return 0;
+}
+
+/* 변경 행 직전까지 반영한다. 첫 변경이면 임시 파일·복사 핸들·버퍼를 연다. */
+static int begin_change(RewriteState *s, int64_t row_offset) {
+    if (s->out == NULL) {
+        s->buf = malloc(COPY_BUF_BYTES);
+        if (s->buf == NULL) {
+            s->failure = REWRITE_NO_MEMORY;
+            return -1;
+        }
+        s->src = fopen(s->src_path, "rb");
+        if (s->src == NULL) {
+            s->failure = REWRITE_SOURCE_FAILED;
+            s->saved_errno = errno;
+            return -1;
+        }
+        s->out = fopen(s->tmp_path, "wb");
+        if (s->out == NULL) {
+            s->failure = REWRITE_TEMP_OPEN_FAILED;
+            s->saved_errno = errno;
+            return -1;
+        }
+    }
+    return copy_until(s, row_offset);
+}
+
+static int add_index_entry(RewriteState *s, int64_t id, int64_t bytes) {
+    BPTreeNode *leaf = bptree_reserve_append(&s->index);
+    if (leaf == NULL) {
+        s->failure = REWRITE_NO_MEMORY;
+        return -1;
+    }
+    bptree_append(leaf, id, s->offset);
+    s->offset += bytes;
+    s->last_kept = id;
+    return 0;
+}
+
+/* scan_rows_spans 콜백: 행 하나의 결정을 받아 새 인덱스에 넣고, 변경 행이면 임시 파일에 반영한다. */
+static int rewrite_span(const Row *row, int64_t offset, int64_t bytes, void *opaque) {
     RewriteState *s = opaque;
     RowEdit edit = {REWRITE_KEEP, NULL, 0};
     AppendRow out;
-    BPTreeNode *leaf;
     int w;
 
     if (s->fn(row, s->ctx, &edit) != 0) {
@@ -595,7 +750,14 @@ static int rewrite_row(const Row *row, void *opaque) {
         return -1;
     }
     switch (edit.action) {
+    case REWRITE_KEEP:
+        /* 나중에 구간째 복사한다. 새 파일에서의 위치는 지금 정해진다. */
+        return add_index_entry(s, row->id, bytes);
     case REWRITE_DELETE:
+        if (begin_change(s, offset) != 0) {
+            return -1;
+        }
+        s->copied = offset + bytes;
         s->changed++;
         return 0;
     case REWRITE_REPLACE:
@@ -605,31 +767,21 @@ static int rewrite_row(const Row *row, void *opaque) {
             s->failure = REWRITE_UNSTORABLE;
             return -1;
         }
+        if (begin_change(s, offset) != 0) {
+            return -1;
+        }
+        w = fprintf(s->out, "%" PRId64 "\t%s\t%d\n", row->id, out.name, out.age);
+        if (w < 0) {
+            s->failure = REWRITE_WRITE_FAILED;
+            s->saved_errno = errno;
+            return -1;
+        }
+        s->copied = offset + bytes;
         s->changed++;
-        break;
-    case REWRITE_KEEP:
-        out.name = row->name;
-        out.age = row->age;
-        break;
-    default:
-        s->failure = REWRITE_CALLBACK_FAILED;
-        return -1;
+        return add_index_entry(s, row->id, w);
     }
-    leaf = bptree_reserve_append(&s->index);
-    if (leaf == NULL) {
-        s->failure = REWRITE_NO_MEMORY;
-        return -1;
-    }
-    /* 기존 줄은 정규형이므로 KEEP 행은 원래 줄과 같은 바이트로 다시 쓰인다. */
-    w = fprintf(s->out, "%" PRId64 "\t%s\t%d\n", row->id, out.name, out.age);
-    if (w < 0) {
-        s->failure = REWRITE_WRITE_FAILED;
-        s->saved_errno = errno;
-        return -1;
-    }
-    bptree_append(leaf, row->id, s->offset);
-    s->offset += w;
-    return 0;
+    s->failure = REWRITE_CALLBACK_FAILED;
+    return -1;
 }
 
 /* from을 to로 바꾼다. 이미 있는 to는 대체한다. */
@@ -647,8 +799,27 @@ static int replace_file(const char *from, const char *to) {
 #endif
 }
 
+#ifdef MINIDB_TEST_HOOKS
+int storage_test_fail_sync = 0;
+
+/* 테스트 빌드 전용: 지정한 sync 한 번을 EIO로 실패시킨다. */
+static bool test_sync_fails(int which) {
+    if (storage_test_fail_sync != which) {
+        return false;
+    }
+    storage_test_fail_sync = 0;
+    errno = EIO;
+    return true;
+}
+#endif
+
 /* fflush한 파일의 내용을 디스크까지 내린다. */
 static int sync_file(FILE *fp) {
+#ifdef MINIDB_TEST_HOOKS
+    if (test_sync_fails(1)) {
+        return -1;
+    }
+#endif
 #ifdef _WIN32
     return _commit(_fileno(fp)); /* FlushFileBuffers */
 #else
@@ -661,6 +832,11 @@ static int sync_file(FILE *fp) {
  * 폴더를 열 권한이 없거나(EACCES) 폴더 fsync를 지원하지 않는 파일 시스템(EINVAL·EBADF)이면
  * 할 수 있는 것이 없으므로 성공으로 본다(PostgreSQL과 같은 규칙). */
 static int sync_parent_dir(const char *path) {
+#ifdef MINIDB_TEST_HOOKS
+    if (test_sync_fails(2)) {
+        return -1;
+    }
+#endif
 #ifdef _WIN32
     (void)path;
     return 0;
@@ -700,6 +876,53 @@ static int sync_parent_dir(const char *path) {
 #endif
 }
 
+/* users.meta에 value를 기록한다. users.meta.tmp에 쓰고 fsync한 뒤 대체하고 폴더를 fsync한다.
+ * 실패해도 users.tsv와 Table은 그대로다. 대체까지 된 뒤 실패하면 meta_id만 갱신하지 않는다
+ * (다음 기록에서 다시 쓴다. 값이 커질 뿐이라 안전하다). */
+static int write_meta(Table *t, int64_t value, DbError *err) {
+    size_t len = strlen(t->meta_path) + sizeof TEMP_SUFFIX;
+    char *tmp = malloc(len);
+    FILE *fp;
+    bool ok;
+    int saved_errno;
+
+    if (tmp == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
+        return -1;
+    }
+    snprintf(tmp, len, "%s%s", t->meta_path, TEMP_SUFFIX);
+    fp = fopen(tmp, "wb");
+    if (fp == NULL) {
+        db_error_set(err, "보조 파일을 만들 수 없습니다: %s (%s)", tmp, strerror(errno));
+        free(tmp);
+        return -1;
+    }
+    ok = fprintf(fp, META_KEY "%" PRId64 "\n", value) > 0 && fflush(fp) == 0 && sync_file(fp) == 0;
+    saved_errno = errno;
+    if (fclose(fp) != 0 && ok) {
+        ok = false;
+        saved_errno = errno;
+    }
+    if (ok && replace_file(tmp, t->meta_path) != 0) {
+        ok = false;
+        saved_errno = errno;
+    }
+    if (!ok) {
+        (void)remove(tmp);
+        db_error_set(err, "보조 파일 쓰기 실패: %s (%s)", t->meta_path, strerror(saved_errno));
+        free(tmp);
+        return -1;
+    }
+    free(tmp);
+    if (sync_parent_dir(t->meta_path) != 0) {
+        db_error_set(err, "보조 파일 교체를 디스크에 기록하지 못했습니다: %s (%s)", t->meta_path,
+                     strerror(errno));
+        return -1;
+    }
+    t->meta_id = value;
+    return 0;
+}
+
 /* Table과 모든 reader의 파일을 path로 다시 연다. 하나라도 실패하면 Table을 쓸 수 없게 한다. */
 static bool reopen_files(Table *t) {
     bool ok = true;
@@ -737,9 +960,10 @@ static void close_files(Table *t) {
 
 /*
  * 순서:
- *   1. 기존 파일을 처음부터 검증하며 읽고, 행마다 fn의 결정대로 임시 파일에 쓴다.
+ *   1. 기존 파일을 처음부터 검증하며 읽고, 행마다 fn의 결정을 받는다. 첫 변경 행에서 임시 파일을 열고,
+ *      그 앞의 바뀌지 않은 행은 원래 바이트로 복사한다(rewrite_span). 스캔이 끝나면 남은 구간을 복사한다.
  *      새 인덱스도 같은 순서로 만든다(ID는 그대로라 계속 증가한다).
- *   2. 바뀐 행이 없으면 임시 파일을 지우고 끝낸다. 파일은 그대로다.
+ *   2. 바뀐 행이 없으면 임시 파일을 만들지 않고 끝낸다. 파일은 그대로다.
  *   3. 임시 파일을 flush·fsync·close한 뒤 열린 파일을 모두 닫고 원래 파일을 대체한다.
  *   4. 인덱스를 새 것으로 바꾸고 새 파일을 다시 연 뒤, 폴더를 fsync해 대체를 디스크에 남긴다.
  * 3의 대체 전까지 실패하면 원래 파일과 인덱스는 그대로다. 대체는 내용이 디스크에 기록된 임시 파일로만
@@ -751,6 +975,7 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
     RewriteState s;
     char *tmp_path = NULL;
     size_t tmp_len;
+    int64_t end = 0;
     bool replaced = false;
     int rc = -1;
 
@@ -775,14 +1000,11 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
         return -1;
     }
     snprintf(tmp_path, tmp_len, "%s%s", t->path, TEMP_SUFFIX);
-    s.out = fopen(tmp_path, "wb");
-    if (s.out == NULL) {
-        db_error_set(err, "임시 파일을 만들 수 없습니다: %s (%s)", tmp_path, strerror(errno));
-        free(tmp_path);
-        return -1;
-    }
+    s.src_path = t->path;
+    s.tmp_path = tmp_path;
 
-    if (scan_rows(t, t->fp, rewrite_row, &s, false, err) != 0) {
+    if (scan_rows_spans(t, t->fp, NULL, rewrite_span, &s, false, &end, err) != 0 ||
+        (s.changed > 0 && copy_until(&s, end) != 0)) {
         switch (s.failure) {
         case REWRITE_OK: /* 기존 파일 손상·읽기 오류: scan_rows가 남긴 메시지를 쓴다 */
             break;
@@ -798,8 +1020,19 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
         case REWRITE_WRITE_FAILED:
             db_error_set(err, "임시 파일 쓰기 실패: %s (%s)", tmp_path, strerror(s.saved_errno));
             break;
+        case REWRITE_TEMP_OPEN_FAILED:
+            db_error_set(err, "임시 파일을 만들 수 없습니다: %s (%s)", tmp_path, strerror(s.saved_errno));
+            break;
+        case REWRITE_SOURCE_FAILED:
+            db_error_set(err, "데이터 파일 복사 실패: %s (%s)", t->path, strerror(s.saved_errno));
+            break;
         }
         goto out;
+    }
+    /* Windows는 열린 파일을 대체할 수 없으므로 교체 전에 복사 핸들을 닫는다. */
+    if (s.src != NULL) {
+        (void)fclose(s.src);
+        s.src = NULL;
     }
     if (s.changed == 0) {
         rc = 0;
@@ -820,6 +1053,11 @@ int table_rewrite(Table *t, RewriteFn fn, void *ctx, size_t *changed, DbError *e
     }
     s.out = NULL;
 
+    /* 최대 ID 행을 지우면 재시작 뒤 그 ID를 다시 부여하지 않도록 users.tsv를 바꾸기 전에 최대 ID를
+     * users.meta에 남긴다. 순서가 반대면 그 사이 장애에서 ID가 재사용될 수 있다. */
+    if (s.last_kept < t->last_id && t->meta_id < t->last_id && write_meta(t, t->last_id, err) != 0) {
+        goto out;
+    }
     close_files(t);
     if (replace_file(tmp_path, t->path) != 0) {
         int saved_errno = errno;
@@ -853,10 +1091,14 @@ out:
     if (s.out != NULL) {
         (void)fclose(s.out);
     }
+    if (s.src != NULL) {
+        (void)fclose(s.src);
+    }
     if (!replaced) {
         (void)remove(tmp_path);
     }
     bptree_clear(&s.index);
+    free(s.buf);
     free(tmp_path);
     return rc;
 }
@@ -873,6 +1115,7 @@ int table_close(Table *t, DbError *err) {
     }
     bptree_clear(&t->index);
     free(t->path);
+    free(t->meta_path);
     free(t);
     return rc == 0 ? 0 : -1;
 }

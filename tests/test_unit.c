@@ -7,6 +7,7 @@
 #endif
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,8 @@ static const char *fresh_dir(const char *name) {
 
     snprintf(dir, sizeof dir, "%s/%s", g_base, name);
     snprintf(file, sizeof file, "%s/users.tsv", dir);
+    remove(file);
+    snprintf(file, sizeof file, "%s/users.meta", dir);
     remove(file);
     make_dir(dir);
     return dir;
@@ -1366,7 +1369,7 @@ static void test_executor_update_delete(void) {
     read_file(dir, buf, sizeof buf);
     CHECK(strcmp(buf, "2\tbee\t31\n3\tc\t31\n5\te\t50\n") == 0);
 
-    /* 다시 열어도 변경이 남는다. 재시작하면 다음 ID는 파일의 최대 ID에서 다시 계산한다. */
+    /* 다시 열어도 변경이 남는다. 최대 ID를 지운 뒤 재시작해도 그 ID를 다시 쓰지 않는다(users.meta). */
     CHECK(table_close(t, &err) == 0);
     CHECK(table_open(dir, &t, &err) == 0);
     memset(&c, 0, sizeof c);
@@ -1374,7 +1377,7 @@ static void test_executor_update_delete(void) {
     CHECK(run_sql(t, "DELETE FROM users WHERE id = 5;", &n, &err) == 0 && n == 1);
     CHECK(table_close(t, &err) == 0);
     CHECK(table_open(dir, &t, &err) == 0);
-    CHECK(table_append(t, "f", 1, &id, &err) == 0 && id == 4);
+    CHECK(table_append(t, "f", 1, &id, &err) == 0 && id == 6);
 
     /* 조건 없는 DELETE는 모든 행을 지운다. 빈 테이블에도 계속 추가할 수 있다. */
     CHECK(run_sql(t, "DELETE FROM users;", &n, &err) == 0 && n == 3);
@@ -1384,7 +1387,9 @@ static void test_executor_update_delete(void) {
     CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 0);
     CHECK(table_find_id(t, 2, collect_row, &c, &err) == 0 && c.count == 0);
     CHECK(run_sql(t, "UPDATE users SET age = 1;", &n, &err) == 0 && n == 0);
-    CHECK(table_append(t, "g", 2, &id, &err) == 0 && id == 5);
+    CHECK(table_close(t, &err) == 0);
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_append(t, "g", 2, &id, &err) == 0 && id == 7);
     CHECK(table_close(t, &err) == 0);
 }
 
@@ -1426,6 +1431,63 @@ static void test_modify_id_miss_skips_scan(void) {
     read_file(dir, buf, sizeof buf);
     CHECK(strcmp(buf, damaged) == 0);
     CHECK(table_close(t, &err) == 0);
+}
+
+static void write_meta_file(const char *dir, const char *text) {
+    char file[600];
+    FILE *fp;
+
+    snprintf(file, sizeof file, "%s/users.meta", dir);
+    fp = fopen(file, "wb");
+    if (fp == NULL) {
+        fprintf(stderr, "테스트 파일 생성 실패: %s\n", file);
+        exit(2);
+    }
+    fputs(text, fp);
+    fclose(fp);
+}
+
+/* users.meta 규칙(계획 13): 시작할 때 max(파일 최대 ID, meta), 형식 오류는 실패,
+ * 최대 ID가 아닌 행을 지우면 meta를 쓰지 않는다. */
+static void test_meta_file(void) {
+    static const char *const bad[] = {
+        "max_id\t\n", "max_id\t0\n", "max_id\t05\n", "max_id\t5", "max_id\t5\n\n", "id\t5\n",
+        "max_id\t-5\n", "max_id\t99999999999999999999\n", "",
+    };
+    const char *dir = fresh_dir("meta");
+    const char data[] = "1\ta\t1\n2\tb\t2\n3\tc\t3\n";
+    char meta_path[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    size_t n = 0;
+    int64_t id = 0;
+
+    snprintf(meta_path, sizeof meta_path, "%s/users.meta", dir);
+    write_file(dir, data, sizeof data - 1);
+
+    /* meta가 없으면 기존 규칙. 최대 ID가 아닌 행을 지워도 meta를 만들지 않는다. */
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 1;", &n, &err) == 0 && n == 1);
+    CHECK(!file_exists(meta_path));
+    CHECK(table_append(t, "d", 4, &id, &err) == 0 && id == 4);
+    CHECK(table_close(t, &err) == 0);
+
+    /* meta가 파일 최대 ID보다 작으면 파일 값, 크면 meta 값을 쓴다. */
+    write_meta_file(dir, "max_id\t2\n");
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_append(t, "e", 5, &id, &err) == 0 && id == 5);
+    CHECK(table_close(t, &err) == 0);
+    write_meta_file(dir, "max_id\t10\n");
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_append(t, "f", 6, &id, &err) == 0 && id == 11);
+    CHECK(table_close(t, &err) == 0);
+
+    /* 형식이 틀리면 열지 않는다. */
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        write_meta_file(dir, bad[i]);
+        t = NULL;
+        CHECK(table_open(dir, &t, &err) == -1 && t == NULL && strstr(err.msg, "보조 파일 손상") != NULL);
+    }
 }
 
 static int fail_rewrite(const Row *row, void *ctx, RowEdit *edit) {
@@ -1481,6 +1543,118 @@ static void test_rewrite_failures_keep_file(void) {
     CHECK(table_rewrite(t, delete_first, NULL, &changed, &err) == 0 && changed == 1);
     read_file(dir, buf, sizeof buf);
     CHECK(strcmp(buf, "2\tb\t2\n3\tc\t3\n4\td\t4\n") == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
+/* 1만 행 파일을 만든다. 2·3번 행은 age 99, 9999번 행은 age 98, 나머지는 id % 50.
+ * name은 id에 따라 길이가 다르다. 만든 바이트 수를 돌려준다. */
+enum { BIG_ROWS = 10000, BIG_CAP = 512 * 1024 };
+
+static size_t big_rows(char *buf, size_t cap, int64_t update_id, const char *new_name, int new_age,
+                       bool delete_99) {
+    size_t n = 0;
+
+    for (int64_t id = 1; id <= BIG_ROWS; id++) {
+        int age = id == 2 || id == 3 ? 99 : id == 9999 ? 98 : (int)(id % 50);
+        if (delete_99 && age == 99) {
+            continue;
+        }
+        if (id == update_id) {
+            n += (size_t)snprintf(buf + n, cap - n, "%" PRId64 "\t%s\t%d\n", id, new_name, new_age);
+        } else {
+            n += (size_t)snprintf(buf + n, cap - n, "%" PRId64 "\tname%.*s\t%d\n", id, (int)(id % 7), "xxxxxxx",
+                                  age);
+        }
+    }
+    return n;
+}
+
+/* 복사 버퍼(64 KiB)보다 큰 파일에서 구간 복사가 원래 바이트를 그대로 옮기고, 인덱스가 새 위치를 가리킨다(계획 16). */
+static void test_rewrite_large_copy(void) {
+    const char *dir = fresh_dir("rewrite_large");
+    char *expected = malloc(BIG_CAP);
+    char *actual = malloc(BIG_CAP);
+    Table *t = NULL;
+    DbError err = {{0}};
+    Collected c;
+    size_t len;
+    size_t n = 0;
+
+    CHECK(expected != NULL && actual != NULL);
+    if (expected == NULL || actual == NULL) {
+        free(expected);
+        free(actual);
+        return;
+    }
+    len = big_rows(expected, BIG_CAP, 0, NULL, 0, false);
+    CHECK(len > 2 * 64 * 1024);
+    write_file(dir, expected, len);
+    CHECK(table_open(dir, &t, &err) == 0);
+
+    /* 가운데 행 이름을 길게 바꾸고(뒤쪽 위치가 밀린다), 앞쪽 연속 두 행을 한 문장으로 지운다. */
+    CHECK(run_sql(t, "UPDATE users SET name = '훨씬 더 긴 새 이름', age = 7 WHERE id = 5000;", &n, &err) == 0 &&
+          n == 1);
+    CHECK(run_sql(t, "DELETE FROM users WHERE age = 99;", &n, &err) == 0 && n == 2);
+    len = big_rows(expected, BIG_CAP, 5000, "훨씬 더 긴 새 이름", 7, true);
+    CHECK(read_file(dir, actual, BIG_CAP) == len && memcmp(actual, expected, len) == 0);
+
+    /* 끝에서 두 번째 행 변경: 마지막 행만 복사로 남는다. */
+    CHECK(run_sql(t, "UPDATE users SET age = 97 WHERE age = 98;", &n, &err) == 0 && n == 1);
+    memset(&c, 0, sizeof c);
+    CHECK(table_find_id(t, 9999, collect_row, &c, &err) == 0 && c.count == 1 && c.ages[0] == 97);
+    CHECK(table_find_id(t, BIG_ROWS, collect_row, &c, &err) == 0 && c.count == 2 && c.ids[1] == BIG_ROWS);
+    CHECK(table_find_id(t, 5001, collect_row, &c, &err) == 0 && c.count == 3 && c.ids[2] == 5001);
+    CHECK(table_find_id(t, 5000, collect_row, &c, &err) == 0 && c.count == 4 &&
+          strcmp(c.names[3], "훨씬 더 긴 새 이름") == 0);
+    CHECK(table_close(t, &err) == 0);
+
+    /* 다시 열기(전체 검증)도 통과한다. */
+    CHECK(table_open(dir, &t, &err) == 0);
+    CHECK(table_close(t, &err) == 0);
+    free(expected);
+    free(actual);
+}
+
+/* fsync 실패 두 분기(계획 15-A): 임시 파일 fsync 실패는 아무것도 바꾸지 않고, 교체 뒤 폴더 fsync
+ * 실패는 변경을 적용한 채 Table을 막는다. */
+static void test_rewrite_sync_failures(void) {
+    const char *dir = fresh_dir("rewrite_sync_fail");
+    const char data[] = "1\ta\t1\n2\tb\t2\n3\tc\t3\n";
+    char buf[256];
+    char tmp_path[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    Collected c;
+    size_t changed = 99;
+    size_t n = 0;
+    int64_t id = 0;
+
+    snprintf(tmp_path, sizeof tmp_path, "%s/users.tsv.tmp", dir);
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+
+    storage_test_fail_sync = 1;
+    CHECK(table_rewrite(t, delete_first, NULL, &changed, &err) == -1 && changed == 0);
+    CHECK(strstr(err.msg, "임시 파일을 디스크에 기록하지 못했습니다") != NULL);
+    CHECK(storage_test_fail_sync == 0);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, data) == 0);
+    CHECK(!file_exists(tmp_path));
+    CHECK(table_append(t, "d", 4, &id, &err) == 0 && id == 4);
+
+    storage_test_fail_sync = 2;
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 2;", &n, &err) == -1 && n == 1);
+    CHECK(strstr(err.msg, "변경 1행은 적용됨") != NULL && strstr(err.msg, "디스크에 기록하지") != NULL);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, "1\ta\t1\n3\tc\t3\n4\td\t4\n") == 0);
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == -1 && strstr(err.msg, "쓰기에 실패한") != NULL);
+    CHECK(table_close(t, &err) == 0);
+
+    /* 다시 열면 적용된 내용 그대로 쓸 수 있다. */
+    CHECK(table_open(dir, &t, &err) == 0);
+    memset(&c, 0, sizeof c);
+    CHECK(table_scan(t, collect_row, &c, &err) == 0 && c.count == 3 && c.ids[1] == 3);
     CHECK(table_close(t, &err) == 0);
 }
 
@@ -1630,7 +1804,10 @@ int main(int argc, char **argv) {
     test_parse_update_delete_errors();
     test_executor_update_delete();
     test_modify_id_miss_skips_scan();
+    test_meta_file();
     test_rewrite_failures_keep_file();
+    test_rewrite_sync_failures();
+    test_rewrite_large_copy();
 #ifndef _WIN32
     test_rewrite_write_failure();
 #endif

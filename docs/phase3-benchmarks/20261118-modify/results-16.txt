@@ -1,0 +1,25 @@
+# 계획 16 적용 후 측정 원시 출력 (2026-11-18, f89f37c + 미커밋 11·13·15-A·16 변경). 환경·명령은 results.txt와 같다.
+
+## 컨테이너
+update_id_hit      rows=10000    min     7.462 ms  median     8.014 ms  max    10.178 ms
+update_age_miss    rows=10000    min     0.485 ms  median     0.545 ms  max     0.736 ms
+delete_id_miss     rows=10000    min     0.000 ms  median     0.000 ms  max     0.001 ms
+delete_id_hit      rows=10000    min     6.043 ms  median     6.813 ms  max     6.912 ms
+select_scan        rows=10000    min     0.422 ms  median     0.459 ms  max     0.518 ms
+update_id_hit      rows=100000   min    13.270 ms  median    13.560 ms  max    16.147 ms
+update_age_miss    rows=100000   min     5.489 ms  median     5.525 ms  max     5.652 ms
+delete_id_miss     rows=100000   min     0.000 ms  median     0.000 ms  max     0.002 ms
+delete_id_hit      rows=100000   min    13.475 ms  median    13.812 ms  max    14.426 ms
+select_scan        rows=100000   min     4.514 ms  median     4.540 ms  max     4.707 ms
+update_id_hit      rows=1000000  min    83.547 ms  median    85.095 ms  max    94.982 ms
+update_age_miss    rows=1000000  min    59.559 ms  median    59.955 ms  max    60.729 ms
+delete_id_miss     rows=1000000  min     0.000 ms  median     0.000 ms  max     0.002 ms
+delete_id_hit      rows=1000000  min    84.412 ms  median    87.079 ms  max    93.361 ms
+select_scan        rows=1000000  min    44.931 ms  median    45.552 ms  max    46.585 ms
+
+## Windows 10 호스트 (100만 행)
+update_id_hit      rows=1000000  min   143.401 ms  median   145.603 ms  max   147.432 ms
+update_age_miss    rows=1000000  min    94.992 ms  median   107.634 ms  max   112.927 ms
+delete_id_miss     rows=1000000  min     0.000 ms  median     0.000 ms  max     0.001 ms
+delete_id_hit      rows=1000000  min   103.644 ms  median   114.404 ms  max   115.521 ms
+select_scan        rows=1000000  min    51.945 ms  median    51.973 ms  max    55.448 ms

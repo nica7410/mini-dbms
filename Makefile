@@ -37,8 +37,9 @@ build:
 $(BIN): $(SRC) src/main.c $(HDR) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRC) src/main.c
 
+# 단위 테스트만 실패 주입 지점(MINIDB_TEST_HOOKS)을 켠다. 제품 실행 파일에는 들어가지 않는다.
 $(TEST_BIN): $(SRC) tests/test_unit.c $(HDR) | build
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ $(SRC) tests/test_unit.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DMINIDB_TEST_HOOKS -Isrc -o $@ $(SRC) tests/test_unit.c
 
 $(BENCH_BIN): $(SRC) tests/benchmark.c $(HDR) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ $(SRC) tests/benchmark.c
@@ -58,7 +59,7 @@ cli: $(BIN)
 sanitize:
 	mkdir -p build/san
 	$(CC) $(CFLAGS) $(SAN_FLAGS) -o build/san/minidb $(SRC) src/main.c
-	$(CC) $(CFLAGS) $(SAN_FLAGS) -Isrc -o build/san/test_unit $(SRC) tests/test_unit.c
+	$(CC) $(CFLAGS) $(SAN_FLAGS) -DMINIDB_TEST_HOOKS -Isrc -o build/san/test_unit $(SRC) tests/test_unit.c
 	ASAN_OPTIONS=detect_leaks=1 build/san/test_unit build/san/tmp_unit
 	ASAN_OPTIONS=detect_leaks=1 $(PYTHON) tests/cli_test.py build/san/minidb
 
