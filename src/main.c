@@ -4,6 +4,10 @@
  *
  * 종료 코드: 0 성공, 1 SQL·데이터·파일 오류, 2 잘못된 사용법
  */
+#ifndef _WIN32
+#define _DEFAULT_SOURCE /* flock, O_CLOEXEC */
+#endif
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,14 +18,32 @@
 #include "storage.h"
 
 #ifdef _WIN32
+#include <direct.h>
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #define EXIT_FAIL 1
 #define EXIT_USAGE 2
 #define DEFAULT_DATA_DIR "data"
+/* 서버(server/main.cpp의 DataDirectoryLock)와 같은 파일이어야 서로를 막는다. */
+#define LOCK_FILE ".minidb-server.lock"
+
+#ifdef _WIN32
+typedef HANDLE DirLock;
+#define NO_DIR_LOCK INVALID_HANDLE_VALUE
+#define make_dir(path) _mkdir(path)
+#else
+typedef int DirLock;
+#define NO_DIR_LOCK (-1)
+#define make_dir(path) mkdir((path), 0755)
+#endif
 
 #ifdef _WIN32
 static UINT g_old_console_cp;
@@ -100,6 +122,81 @@ static char *read_sql_file(const char *path, size_t *out_len, DbError *err) {
     return buf;
 }
 
+/*
+ * 데이터 디렉터리를 서버와 같은 방식으로 잠근다(POSIX flock, Windows 공유 모드 0).
+ * 서버나 다른 minidb가 쓰는 중이면 기다리지 않고 실패한다. 서버가 열어 둔 파일을
+ * CLI의 UPDATE·DELETE가 교체하면 서버가 응답한 쓰기가 사라지기 때문이다.
+ * 디렉터리가 없으면 table_open과 같이 한 단계만 만든다.
+ */
+static int lock_data_dir(const char *dir, DirLock *out, DbError *err) {
+    size_t len = strlen(dir) + 1 + strlen(LOCK_FILE) + 1;
+    char *path = malloc(len);
+    DirLock lock;
+
+    *out = NO_DIR_LOCK;
+    if (path == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
+        return -1;
+    }
+    snprintf(path, len, "%s/%s", dir, LOCK_FILE);
+#ifdef _WIN32
+    lock = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (lock == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PATH_NOT_FOUND &&
+        (make_dir(dir) == 0 || errno == EEXIST)) {
+        lock = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (lock == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        if (code == ERROR_SHARING_VIOLATION) {
+            db_error_set(err, "데이터 디렉터리를 다른 프로세스(서버 또는 다른 minidb)가 사용 중입니다: %s", dir);
+        } else {
+            db_error_set(err, "데이터 디렉터리 잠금 파일을 열 수 없습니다: %s (Windows 오류 %lu)", path,
+                         (unsigned long)code);
+        }
+        free(path);
+        return -1;
+    }
+#else
+    lock = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (lock < 0 && errno == ENOENT && (make_dir(dir) == 0 || errno == EEXIST)) {
+        lock = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    }
+    if (lock < 0) {
+        db_error_set(err, "데이터 디렉터리 잠금 파일을 열 수 없습니다: %s (%s)", path, strerror(errno));
+        free(path);
+        return -1;
+    }
+    if (flock(lock, LOCK_EX | LOCK_NB) != 0) {
+        int saved_errno = errno;
+        close(lock);
+        if (saved_errno == EWOULDBLOCK) {
+            db_error_set(err, "데이터 디렉터리를 다른 프로세스(서버 또는 다른 minidb)가 사용 중입니다: %s", dir);
+        } else {
+            db_error_set(err, "데이터 디렉터리를 잠글 수 없습니다: %s (%s)", path, strerror(saved_errno));
+        }
+        free(path);
+        return -1;
+    }
+#endif
+    free(path);
+    *out = lock;
+    return 0;
+}
+
+static void unlock_data_dir(DirLock lock) {
+#ifdef _WIN32
+    if (lock != NO_DIR_LOCK) {
+        CloseHandle(lock);
+    }
+#else
+    if (lock != NO_DIR_LOCK) {
+        close(lock);
+    }
+#endif
+}
+
 /* 행마다 개수만 센다. 문장이 성공하면 main이 "INSERT N"을 한 번 출력한다. */
 static int count_insert(int64_t id, void *ctx) {
     (void)id;
@@ -135,6 +232,7 @@ int main(int argc, char **argv) {
     size_t sql_len = 0;
     size_t pos = 0;
     Table *table = NULL;
+    DirLock dir_lock = NO_DIR_LOCK;
     size_t inserted = 0; /* INSERT·UPDATE·DELETE가 기록·변경한 행 수 */
     ResultSink sink = {count_insert, print_row, &inserted, record_change};
     long stmt_no = 0;
@@ -183,8 +281,15 @@ int main(int argc, char **argv) {
         pos = 3; /* UTF-8 BOM 건너뛰기 */
     }
 
+    /* 파일을 읽기 전에 잠그고, table_close가 끝날 때까지 유지한다. */
+    if (lock_data_dir(data_dir, &dir_lock, &err) != 0) {
+        report(0, &err);
+        free(sql);
+        return EXIT_FAIL;
+    }
     if (table_open(data_dir, &table, &err) != 0) {
         report(0, &err);
+        unlock_data_dir(dir_lock);
         free(sql);
         return EXIT_FAIL;
     }
@@ -234,6 +339,7 @@ int main(int argc, char **argv) {
         report(0, &err);
         status = EXIT_FAIL;
     }
+    unlock_data_dir(dir_lock);
     free(sql);
     if (fflush(stdout) != 0 && status == 0) {
         fprintf(stderr, "오류: 결과 출력에 실패했습니다\n");

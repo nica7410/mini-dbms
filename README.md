@@ -125,4 +125,4 @@ ctest --test-dir build/server --output-on-failure
 ./build/server/minidb_server --data-dir data-api --port 8080
 ```
 
-같은 데이터 디렉터리에 기존 CLI와 서버를 동시에 실행하지 않는다. 기존 `make test`와 Phase 2 벤치마크 명령은 그대로 사용할 수 있다.
+CLI도 서버와 같은 데이터 디렉터리 잠금(`.minidb-server.lock`)을 잡는다. 서버가 쓰는 폴더에서 CLI를 실행하면 아무것도 읽거나 쓰지 않고 "사용 중" 오류로 끝난다. CLI로 그 데이터를 다루려면 먼저 서버를 종료한다. 기존 `make test`와 Phase 2 벤치마크 명령은 그대로 사용할 수 있다.

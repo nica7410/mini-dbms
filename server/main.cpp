@@ -210,7 +210,7 @@ Options parse_options(int argc, char **argv) {
 }
 
 // Prevent two Phase 3 servers from independently assigning IDs in one database.
-// The original CLI does not participate in this lock; use it only while stopped.
+// The CLI (src/main.c) takes the same lock file, so it is refused while a server runs.
 class DataDirectoryLock {
 public:
     explicit DataDirectoryLock(const std::string &directory) {

@@ -408,7 +408,21 @@ def a7_data_dir_unusable(env):
     with open(blocker, "wb") as f:
         f.write(b"x")
     expect_fail(env.run_args(["--data-dir", blocker, env.sql_file("SELECT * FROM users;")]),
-                "데이터 파일을 열 수 없습니다")
+                "열 수 없습니다")
+
+
+@test
+def a7_data_dir_locked(env):
+    # 서버가 잡는 것과 같은 잠금 파일. 잡혀 있으면 CLI는 파일을 건드리지 않고 실패한다.
+    os.makedirs(env.data_dir)
+    insert = "INSERT INTO users (name, age) VALUES ('a', 1);"
+    with open(os.path.join(env.data_dir, ".minidb-server.lock"), "a+b") as lock:
+        if os.name != "nt":  # Windows는 열어 두기만 해도 CLI의 공유 모드 0 열기가 실패한다.
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        expect_fail(env.run(insert), "사용 중")
+    assert not os.path.exists(env.data_file), "잠금 실패인데 users.tsv가 생김"
+    expect_ok(env.run(insert), b"INSERT 1\n")
 
 
 @test

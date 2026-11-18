@@ -55,6 +55,7 @@ miniDBMS --data-dir ./data ./examples/basic.sql
 | 결과 | INSERT는 `INSERT N`(N은 기록한 행 수, 한 행이면 `INSERT 1`), SELECT는 아래 TSV 형식. 결과 없음은 헤더만 출력 |
 | 오류 | stderr에 문장 번호와 원인. 즉시 종료. 성공 종료 코드 0, 실패는 0 이외 |
 | 저장 | 첫 실행은 빈 테이블로 시작. 정상 종료 후 재실행해도 데이터 유지 |
+| 잠금 | 실행하는 동안 데이터 디렉터리의 `.minidb-server.lock`을 잡는다(서버와 같은 파일). 서버나 다른 minidb가 쓰는 중이면 파일을 건드리지 않고 "사용 중" 오류로 즉시 끝낸다 |
 
 ```sql
 INSERT INTO users (name, age) VALUES ('민수', 25);
