@@ -192,21 +192,32 @@ static int validate_update(const Statement *st, DbError *err) {
     return 0;
 }
 
+static int mark_found(const Row *row, void *ctx) {
+    (void)row;
+    *(bool *)ctx = true;
+    return 0;
+}
+
 /*
  * 검증을 통과한 뒤 파일 전체를 다시 쓴다(table_rewrite). 일치한 행이 없으면 파일은 그대로다.
+ * WHERE id = N은 먼저 ID 인덱스로 행이 있는지 확인하고, 없으면 파일을 읽지 않고 0행으로 끝낸다.
  * 교체 전에 실패하면 아무것도 바뀌지 않는다. 교체 뒤 실패하면 바뀐 행 수를 먼저 알린다.
  */
 static int run_modify(Table *t, const Statement *st, const ResultSink *sink, DbError *err) {
     RewriteFn fn = st->kind == STMT_UPDATE ? edit_update : edit_delete;
     size_t changed = 0;
     bool reported = true;
+    bool found = false;
     int rc;
 
     if (st->kind == STMT_UPDATE && validate_update(st, err) != 0) {
         return -1;
     }
+    if (st->where == WHERE_ID && table_find_id(t, st->where_value, mark_found, &found, err) != 0) {
+        return -1;
+    }
     /* 콜백은 Statement를 읽기만 한다. */
-    rc = table_rewrite(t, fn, (void *)st, &changed, err);
+    rc = st->where == WHERE_ID && !found ? 0 : table_rewrite(t, fn, (void *)st, &changed, err);
     if (rc == 0 || changed > 0) {
         reported = sink == NULL || sink->on_change == NULL || sink->on_change(changed, sink->ctx) == 0;
     }

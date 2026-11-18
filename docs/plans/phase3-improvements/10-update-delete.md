@@ -40,7 +40,7 @@ DELETE FROM users [WHERE id|age = 정수];
 - 교체 전(검증·쓰기·flush·close·이름 바꾸기) 실패는 아무것도 바꾸지 않고 Table을 계속 쓸 수 있다. 교체 뒤 다시 열기에 실패하면 변경은 적용된 채 Table을 막는다(`write_failed`, 서버는 `DATABASE_UNAVAILABLE`).
 - 일치하는 행이 없으면 파일을 다시 쓰지 않는다.
 - Windows의 `rename`은 대상이 있으면 실패하므로 `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`을 쓴다. 열린 파일은 대체할 수 없으므로 교체 전에 Table과 모든 reader의 `FILE*`를 닫고, 교체 뒤 다시 연다. POSIX에서도 reader가 옛 inode를 계속 읽지 않도록 같은 절차를 따른다. 이를 위해 Table이 열린 reader 목록을 갖는다.
-- 비용은 조건과 관계없이 O(행 수)이고, 서버에서는 그동안 배타 gate를 잡는다.
+- 비용은 O(행 수)이고, 서버에서는 그동안 배타 gate를 잡는다. 단, `WHERE id = N`은 먼저 ID 인덱스를 확인해 없으면 파일을 읽지 않고 0행으로 끝낸다([후속: ID 미스 생략](#후속-where-id-미스-시-파일-읽기-생략-2026-11-18)).
 - `fsync`는 하지 않는다(INSERT와 같은 범위).
 
 ### ID 재사용
@@ -88,6 +88,16 @@ DELETE FROM users [WHERE id|age = 정수];
 ## 남은 한계
 
 - Windows는 MinGW-w64 교차 빌드로만 확인했다. README의 TDM-GCC `mingw32-make test` 경로는 실행하지 않았다.
-- UPDATE·DELETE는 O(행 수)이며 실행 중 다른 SQL을 막는다. 100만 행에서의 지연은 재지 않았다.
+- UPDATE·DELETE는 O(행 수)이며 실행 중 다른 SQL을 막는다(`WHERE id = N`의 ID가 없는 경우 제외). 100만 행에서의 지연은 재지 않았다.
 - 재시작 뒤 끝쪽 ID 재사용(위).
 - 교체 직전 열린 파일을 닫는 동안 다른 프로세스가 같은 파일을 열면(Windows) 교체가 실패할 수 있다. 이 경우 원본은 그대로다.
+
+## 후속: WHERE id 미스 시 파일 읽기 생략 (2026-11-18)
+
+사용자 지시: "WHERE id = N일 때 인덱스로 대상 행이 있는지 먼저 확인해, 없으면 파일을 아예 읽지 않게 하는 것 … 일단 이거 작업 진행해"
+
+- 변경: `src/executor.c`의 `run_modify`가 `WHERE id = N`이면 값 검증 뒤 `table_find_id`로 행을 확인한다. 없으면 `table_rewrite`를 부르지 않고 0행 성공이다. 있으면 기존대로 파일 전체를 다시 쓴다. 저장소 API는 바꾸지 않았다.
+- 비용: 없는 ID는 B+ 트리 조회 한 번(O(log n))이다. 있는 ID는 그 행 하나를 더 읽는다(seek 1회, 이어서 O(행 수) 재작성).
+- 동작 차이: 없는 ID에 대한 UPDATE·DELETE는 더 이상 파일 전체를 검증하지 않는다. 시작 뒤 외부에서 파일이 손상돼도 0행 성공을 돌려준다. `SELECT … WHERE id = N`과 같은 규칙이고, 파일 변경은 이 프로세스만 한다는 전제 안의 차이다.
+- 테스트: `test_modify_id_miss_skips_scan` — 연 뒤 파일 끝에 손상된 줄을 붙이고, 없는 ID의 UPDATE·DELETE는 0행 성공, 값 오류는 여전히 오류, 있는 ID와 `age` 조건은 손상 오류, 파일 불변을 확인한다.
+- 검증: 컨테이너(`mini-dbms-phase3-review:3b19667`)에서 `make test` — 경고 0건, 단위 34742개 검사 실패 0, CLI 33개 PASS. 서버 `ctest`·sanitizer·TSan은 다시 돌리지 않았다(서버 코드 변경 없음, 잠금 범위 동일).

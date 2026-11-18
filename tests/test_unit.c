@@ -1388,6 +1388,46 @@ static void test_executor_update_delete(void) {
     CHECK(table_close(t, &err) == 0);
 }
 
+/* WHERE id = N은 인덱스에 없는 ID면 파일을 읽지 않는다. 열린 뒤 파일 끝을 손상시켜 확인한다:
+ * 파일 전체를 읽는 경로는 손상을 보고하고, 인덱스에서 끝나는 경로는 0행으로 성공한다. */
+static void test_modify_id_miss_skips_scan(void) {
+    const char *dir = fresh_dir("modify_id_miss");
+    const char data[] = "1\ta\t1\n2\tb\t2\n";
+    const char damaged[] = "1\ta\t1\n2\tb\t2\nbroken\n";
+    char buf[256];
+    char file[600];
+    Table *t = NULL;
+    DbError err = {{0}};
+    FILE *fp;
+    size_t n = 0;
+
+    write_file(dir, data, sizeof data - 1);
+    CHECK(table_open(dir, &t, &err) == 0);
+    snprintf(file, sizeof file, "%s/users.tsv", dir);
+    fp = fopen(file, "ab");
+    CHECK(fp != NULL);
+    if (fp == NULL) {
+        table_close(t, &err);
+        return;
+    }
+    fputs("broken\n", fp);
+    fclose(fp);
+
+    CHECK(run_sql(t, "UPDATE users SET age = 9 WHERE id = 99;", &n, &err) == 0 && n == 0);
+    CHECK(run_sql(t, "DELETE FROM users WHERE id = 99;", &n, &err) == 0 && n == 0);
+    /* 값 검증은 ID 조회보다 먼저다. */
+    CHECK(run_sql(t, "UPDATE users SET age = 151 WHERE id = 99;", &n, &err) == -1 &&
+          strstr(err.msg, "허용 범위") != NULL);
+
+    /* 일치하는 ID가 있거나 조건이 id가 아니면 파일 전체를 읽으므로 손상이 드러난다. */
+    CHECK(run_sql(t, "UPDATE users SET age = 9 WHERE id = 2;", &n, &err) == -1 &&
+          strstr(err.msg, "손상") != NULL);
+    CHECK(run_sql(t, "DELETE FROM users WHERE age = 99;", &n, &err) == -1 && strstr(err.msg, "손상") != NULL);
+    read_file(dir, buf, sizeof buf);
+    CHECK(strcmp(buf, damaged) == 0);
+    CHECK(table_close(t, &err) == 0);
+}
+
 static int fail_rewrite(const Row *row, void *ctx, RowEdit *edit) {
     (void)edit;
     return row->id == *(int64_t *)ctx ? -1 : 0;
@@ -1589,6 +1629,7 @@ int main(int argc, char **argv) {
     test_parse_update_delete();
     test_parse_update_delete_errors();
     test_executor_update_delete();
+    test_modify_id_miss_skips_scan();
     test_rewrite_failures_keep_file();
 #ifndef _WIN32
     test_rewrite_write_failure();
