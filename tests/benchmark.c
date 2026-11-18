@@ -131,6 +131,135 @@ static int run_multi_insert(const char *dir, DbError *err) {
     return 0;
 }
 
+/* ---------- modify 모드: UPDATE·DELETE 한 문장의 시간 (계획 11) ---------- */
+
+enum { MODIFY_RUNS = 3 };
+
+typedef struct {
+    size_t affected; /* UPDATE·DELETE의 변경 행 수 또는 SELECT 행 수 */
+} ModifyCount;
+
+static int modify_count_row(const Row *row, void *ctx) {
+    (void)row;
+    ((ModifyCount *)ctx)->affected++;
+    return 0;
+}
+
+static int modify_record_change(size_t affected, void *ctx) {
+    ((ModifyCount *)ctx)->affected = affected;
+    return 0;
+}
+
+/* sql 한 문장을 실행해 걸린 시간(ms)을 *ms에 담는다. 결과 행 수가 expected와 다르면 실패. */
+static int time_statement(Table *table, const char *sql, size_t expected, double *ms, DbError *err) {
+    ModifyCount count = {0};
+    ResultSink sink = {NULL, modify_count_row, &count, modify_record_change};
+    size_t pos = 0;
+    Statement st;
+    double start;
+    int rc;
+
+    if (parser_next(sql, &pos, &st, err) != 1) {
+        return -1;
+    }
+    start = seconds();
+    rc = executor_run(table, &st, &sink, err);
+    *ms = (seconds() - start) * 1e3;
+    statement_free(&st);
+    if (rc != 0) {
+        return -1;
+    }
+    if (count.affected != expected) {
+        db_error_set(err, "%s: 결과 %lu행, 기대 %lu행", sql, (unsigned long)count.affected,
+                     (unsigned long)expected);
+        return -1;
+    }
+    return 0;
+}
+
+static int compare_double(const void *a, const void *b) {
+    double x = *(const double *)a;
+    double y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+static void print_runs(const char *label, long rows, double *ms) {
+    qsort(ms, MODIFY_RUNS, sizeof *ms, compare_double);
+    printf("%-18s rows=%-8ld min %9.3f ms  median %9.3f ms  max %9.3f ms\n", label, rows, ms[0],
+           ms[MODIFY_RUNS / 2], ms[MODIFY_RUNS - 1]);
+}
+
+/*
+ * 빈 디렉터리에 rows행을 채운 뒤 UPDATE·DELETE 4종과 비교용 전체 스캔 SELECT를 MODIFY_RUNS번씩 잰다.
+ * 채우는 시간은 재지 않는다. rows는 MULTI_ROWS의 배수여야 한다.
+ */
+static int run_modify(const char *dir, long rows, DbError *err) {
+    static const char prefix[] = "INSERT INTO users (name, age) VALUES ";
+    static const char row[] = "('other', 25)";
+    size_t cap = sizeof prefix + (size_t)MULTI_ROWS * sizeof row + 2;
+    char *sql = malloc(cap);
+    char stmt[128];
+    Table *table = NULL;
+    double ms[MODIFY_RUNS];
+    long mid = rows / 2;
+    size_t n;
+
+    if (sql == NULL) {
+        db_error_set(err, "메모리가 부족합니다");
+        return -1;
+    }
+    n = (size_t)snprintf(sql, cap, "%s", prefix);
+    for (int i = 0; i < MULTI_ROWS; i++) {
+        n += (size_t)snprintf(sql + n, cap - n, "%s%s", i == 0 ? "" : ",", row);
+    }
+    snprintf(sql + n, cap - n, ";");
+    if (table_open(dir, &table, err) != 0 || table_scan(table, reject_existing_row, NULL, err) != 0) {
+        goto fail;
+    }
+    for (long i = 0; i < rows / MULTI_ROWS; i++) {
+        if (run_sql(table, sql, err) != 0) {
+            goto fail;
+        }
+    }
+
+    /* 한 행 변경: 매번 같은 행 */
+    snprintf(stmt, sizeof stmt, "UPDATE users SET age = 1 WHERE id = %ld;", mid);
+    for (int i = 0; i < MODIFY_RUNS; i++) {
+        if (time_statement(table, stmt, 1, &ms[i], err) != 0) goto fail;
+    }
+    print_runs("update_id_hit", rows, ms);
+    /* 일치 0행이지만 전체를 읽는 경우 */
+    for (int i = 0; i < MODIFY_RUNS; i++) {
+        if (time_statement(table, "UPDATE users SET age = 2 WHERE age = 99;", 0, &ms[i], err) != 0) goto fail;
+    }
+    print_runs("update_age_miss", rows, ms);
+    /* 인덱스에서 끝나는 경우 */
+    snprintf(stmt, sizeof stmt, "DELETE FROM users WHERE id = %ld;", rows + 100);
+    for (int i = 0; i < MODIFY_RUNS; i++) {
+        if (time_statement(table, stmt, 0, &ms[i], err) != 0) goto fail;
+    }
+    print_runs("delete_id_miss", rows, ms);
+    /* 한 행 삭제: 매번 다른 행 */
+    for (int i = 0; i < MODIFY_RUNS; i++) {
+        snprintf(stmt, sizeof stmt, "DELETE FROM users WHERE id = %ld;", mid + 1 + i);
+        if (time_statement(table, stmt, 1, &ms[i], err) != 0) goto fail;
+    }
+    print_runs("delete_id_hit", rows, ms);
+    /* 비교 기준: 전체 스캔 SELECT 한 번 */
+    for (int i = 0; i < MODIFY_RUNS; i++) {
+        if (time_statement(table, "SELECT * FROM users WHERE age = 99;", 0, &ms[i], err) != 0) goto fail;
+    }
+    print_runs("select_scan", rows, ms);
+
+    free(sql);
+    return table_close(table, err);
+
+fail:
+    free(sql);
+    table_close(table, NULL);
+    return -1;
+}
+
 static int measure_select(Table *table, const char *sql, int repeats, double *us, DbError *err) {
     int count = 0;
     ResultSink sink = {NULL, count_target, &count, NULL};
@@ -179,8 +308,21 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (argc == 4 && strcmp(argv[2], "modify") == 0) {
+        char *end = NULL;
+        long rows = strtol(argv[3], &end, 10);
+        if (end == argv[3] || *end != '\0' || rows < MULTI_ROWS || rows % MULTI_ROWS != 0) {
+            fprintf(stderr, "modify: rows must be a positive multiple of %d\n", MULTI_ROWS);
+            return 2;
+        }
+        if (run_modify(argv[1], rows, &err) != 0) {
+            fprintf(stderr, "%s\n", err.msg);
+            return 1;
+        }
+        return 0;
+    }
     if (argc != 2) {
-        fprintf(stderr, "Usage: benchmark <empty temporary data directory> [multi]\n");
+        fprintf(stderr, "Usage: benchmark <empty temporary data directory> [multi | modify <rows>]\n");
         return 2;
     }
     if (table_open(argv[1], &table, &err) != 0) {

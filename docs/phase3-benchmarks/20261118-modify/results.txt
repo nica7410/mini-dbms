@@ -1,0 +1,28 @@
+# 계획 11 측정 원시 출력 (2026-11-18, 기준 커밋 f89f37c + tests/benchmark.c modify 모드)
+# 각 문장 3회. 데이터는 묶음 INSERT로 채운 ('other', 25) 행, id 1..N.
+
+## 컨테이너: mini-dbms-phase3-review:3b19667 (Debian 12, GCC 12.2, -O2), Docker Desktop 29.7.2, 16 vCPU, /tmp = overlay
+## 명령: build/benchmark $(mktemp -d) modify <N>
+update_id_hit      rows=10000    min     7.576 ms  median     8.769 ms  max    10.201 ms
+update_age_miss    rows=10000    min     1.572 ms  median     1.679 ms  max     1.681 ms
+delete_id_miss     rows=10000    min     0.000 ms  median     0.000 ms  max     0.001 ms
+delete_id_hit      rows=10000    min     7.622 ms  median    12.239 ms  max    15.240 ms
+select_scan        rows=10000    min     0.416 ms  median     0.416 ms  max     0.439 ms
+update_id_hit      rows=100000   min    27.832 ms  median    30.100 ms  max    31.701 ms
+update_age_miss    rows=100000   min    14.748 ms  median    15.723 ms  max    15.825 ms
+delete_id_miss     rows=100000   min     0.000 ms  median     0.000 ms  max     0.001 ms
+delete_id_hit      rows=100000   min    26.351 ms  median    28.799 ms  max    28.895 ms
+select_scan        rows=100000   min     4.358 ms  median     4.589 ms  max     4.873 ms
+update_id_hit      rows=1000000  min   240.857 ms  median   242.272 ms  max   264.952 ms
+update_age_miss    rows=1000000  min   169.763 ms  median   174.458 ms  max   181.686 ms
+delete_id_miss     rows=1000000  min     0.000 ms  median     0.000 ms  max     0.002 ms
+delete_id_hit      rows=1000000  min   223.296 ms  median   228.694 ms  max   233.772 ms
+select_scan        rows=1000000  min    45.956 ms  median    46.031 ms  max    46.402 ms
+
+## Windows 10 호스트 (NTFS, 사용자 임시 폴더), MinGW-w64 교차 빌드(-O2 -static)
+## 명령: benchmark.exe <빈 폴더> modify 1000000
+update_id_hit      rows=1000000  min   507.361 ms  median   536.212 ms  max   560.318 ms
+update_age_miss    rows=1000000  min   442.594 ms  median   443.673 ms  max   450.764 ms
+delete_id_miss     rows=1000000  min     0.000 ms  median     0.000 ms  max     0.001 ms
+delete_id_hit      rows=1000000  min   509.136 ms  median   518.292 ms  max   529.672 ms
+select_scan        rows=1000000  min    50.976 ms  median    51.711 ms  max    53.377 ms
