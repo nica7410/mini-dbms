@@ -337,7 +337,7 @@ async def distributed_load(port, scenario, args, rate, seed, prefix, raw_path):
             results.close()
 
 
-async def one_case(binary, variant, workers, scenario, repeat, args, seed_file, rate=None):
+async def one_case(binary, variant, workers, scenario, repeat, args, seed_file, rate=None, extra=()):
     name = f'{variant}-w{workers}-{scenario}-r{repeat}-' + ('closed' if rate is None else f'rate{rate:g}')
     output = args.output / name
     output.mkdir(parents=True, exist_ok=False)
@@ -348,7 +348,7 @@ async def one_case(binary, variant, workers, scenario, repeat, args, seed_file, 
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         command = [str(binary), '--data-dir', directory, '--port', str(port), '--workers', str(workers),
-                   '--io-threads', '2', '--queue-capacity', '256', '--queue-timeout-ms', '5000']
+                   '--io-threads', '2', '--queue-capacity', '256', '--queue-timeout-ms', '5000', *extra]
         log = (output/'server.log').open('wb')
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         samples = []
@@ -446,11 +446,15 @@ async def main(args):
     metadata['cgroup'] = {name: Path('/sys/fs/cgroup', name).read_text().strip()
                           for name in ('cpu.max', 'memory.max') if Path('/sys/fs/cgroup', name).exists()}
     (args.output/'environment.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
-    variants = [('parallel', args.binary)]
+    variants = [('parallel', args.binary, ())]
     if args.serial_binary:
-        variants.append(('serial', args.serial_binary))
+        variants.append(('serial', args.serial_binary, ()))
     if args.old_binary:
-        variants.append(('old', args.old_binary))
+        variants.append(('old', args.old_binary, ()))
+    for spec in args.variant:
+        # NAME=ARGS: the --binary server again with extra options, e.g. ww2=--write-workers 2
+        label, _, extra = spec.partition('=')
+        variants.append((label, args.binary, tuple(extra.split())))
     cases = [(w, scenario, repeat, rate) for repeat in range(args.repeats)
              for w in args.workers for scenario in args.scenarios for rate in args.rates]
     estimate = len(cases)*len(variants)*(args.duration+args.warmup)
@@ -464,8 +468,8 @@ async def main(args):
         fixture(seed, args.rows)
         for index, (workers, scenario, repeat, rate) in enumerate(cases):
             order = variants if index % 2 == 0 else list(reversed(variants))
-            for variant, binary in order:
-                summaries.append(await one_case(binary, variant, workers, scenario, repeat, args, seed, rate))
+            for variant, binary, extra in order:
+                summaries.append(await one_case(binary, variant, workers, scenario, repeat, args, seed, rate, extra))
                 with (args.output/'summary.csv').open('w', newline='', encoding='utf-8') as out:
                     fields = ('name', 'variant', 'workers', 'scenario', 'repeat', 'rate', 'successful_rps',
                               'completed_rps', 'offered_rps', 'not_submitted', 'generator_lag_p99_ms', 'startup_s')
@@ -479,6 +483,8 @@ if __name__ == '__main__':
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--serial-binary', type=Path)
     parser.add_argument('--old-binary', type=Path)
+    parser.add_argument('--variant', action='append', default=[], metavar='NAME=ARGS',
+                        help='also run --binary with extra server options under this variant name')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source-id', required=True)
     parser.add_argument('--rows', type=int, default=1000000)

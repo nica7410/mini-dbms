@@ -1,0 +1,42 @@
+{
+  "arguments": {
+    "binary": "/work/b1/minidb_server",
+    "serial_binary": null,
+    "old_binary": null,
+    "variant": [
+      "ww2=--write-workers 2",
+      "ww4=--write-workers 4"
+    ],
+    "output": "/work/out/s4/s3-ww",
+    "source_id": "5a4c2e7",
+    "rows": 1000000,
+    "workers": [
+      8
+    ],
+    "scenarios": [
+      "scan_write"
+    ],
+    "duration": 30,
+    "warmup": 5,
+    "repeats": 3,
+    "clients": 32,
+    "processes": 4,
+    "seed": 7410,
+    "rates": [
+      null
+    ],
+    "estimate_only": false
+  },
+  "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+  "python": "3.11.2",
+  "cpu_count": 16,
+  "clock": "namespace(implementation='clock_gettime(CLOCK_MONOTONIC)', monotonic=True, adjustable=False, resolution=1e-09)",
+  "source_id": "5a4c2e7",
+  "percentile": "nearest rank of successful responses; errors/censored reported separately",
+  "rps_window": "only completions within measurement duration, excludes drain",
+  "raw_write": "raw JSONL gzip is written after measured load; client holds records in memory",
+  "cgroup": {
+    "cpu.max": "800000 100000",
+    "memory.max": "6442450944"
+  }
+}

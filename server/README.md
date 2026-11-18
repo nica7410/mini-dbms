@@ -140,8 +140,8 @@ curl -sS http://127.0.0.1:8080/metrics
 | 500 | `STORAGE_ERROR` | 기존 엔진의 저장·읽기 실패 |
 | 500 | `INVALID_STORED_TEXT` | 기존 파일의 이름을 UTF-8 JSON으로 반환할 수 없음 |
 | 500 | `INTERNAL_ERROR` | 요청 처리 중 내부 실패 |
-| 503 | `QUEUE_FULL` | 대기 작업 수 또는 대기 요청 바이트 상한 초과 |
-| 503 | `QUEUE_TIMEOUT` | worker가 엔진 실행 전에 확인한 대기 시간 초과 |
+| 503 | `QUEUE_FULL` | 요청이 들어갈 큐(읽기 또는 쓰기)의 대기 작업 수 또는 대기 요청 바이트 상한 초과 |
+| 503 | `QUEUE_TIMEOUT` | SQL 실행 전 대기 시간 초과. worker가 작업을 꺼낼 때 검사하고, INSERT는 쓰기 잠금을 얻은 뒤 한 번 더 검사한다. 어느 경우든 기록하지 않는다(`write_outcome: not_started`) |
 | 503 | `SHUTTING_DOWN` | 종료 중이라 신규 작업을 받지 않음 |
 | 503 | `DATABASE_UNAVAILABLE` | 저장 상태 확인과 재시작이 필요한 엔진 상태 |
 
@@ -171,23 +171,26 @@ curl -sS http://127.0.0.1:8080/metrics
 | `--data-dir` | `data` | DB 파일 디렉터리 |
 | `--host` | `127.0.0.1` | 수신 주소 |
 | `--port` | `8080` | TCP 포트 |
-| `--workers` | `4` | SQL worker와 reader 컨텍스트 수 |
+| `--workers` | `4` | 읽기 큐를 처리하는 SQL worker 수 |
+| `--write-workers` | `2` | 쓰기 큐(INSERT)를 처리하는 SQL worker 수 |
 | `--io-threads` | `2` | HTTP event loop 수 |
-| `--queue-capacity` | `256` | 대기 중인 SQL 작업 수 상한 |
-| `--queue-bytes` | `16777216` | 대기 작업의 원본 JSON 본문 바이트 합 상한 |
+| `--queue-capacity` | `256` | 큐마다 적용하는 대기 SQL 작업 수 상한 |
+| `--queue-bytes` | `16777216` | 큐마다 적용하는 대기 작업의 원본 JSON 본문 바이트 합 상한 |
 | `--max-sql-bytes` | `65536` | 디코딩한 SQL의 UTF-8 바이트 상한 |
 | `--max-rows` | `10000` | SELECT 결과 행 수 상한 |
 | `--max-result-bytes` | `8388608` | 결과 수집 예산 및 최종 JSON 크기 상한 |
-| `--queue-timeout-ms` | `5000` | worker가 엔진 진입 전에 검사하는 대기 만료 기준 |
+| `--queue-timeout-ms` | `5000` | SQL 실행 전 대기 만료 기준. INSERT는 쓰기 잠금 대기도 포함한다 |
 | `--max-connections` | `1024` | HTTP 연결 수 상한 |
 
-숫자 옵션은 양수다. 포트는 65535 이하, SQL·I/O thread 수는 각각 256 이하, SQL 크기는 16 MiB 이하, 결과 크기는 512바이트 이상, 대기 만료는 1일 이하를 허용한다.
+숫자 옵션은 양수다. 포트는 65535 이하, 읽기·쓰기 worker와 I/O thread 수는 각각 256 이하, SQL 크기는 16 MiB 이하, 결과 크기는 512바이트 이상, 대기 만료는 1일 이하를 허용한다.
+
+요청은 HTTP I/O 스레드에서 SQL의 첫 키워드만 보고 나눈다. `INSERT`로 시작하면 쓰기 큐, 그 밖의 모든 요청(SELECT, 문법 오류, 빈 SQL)은 읽기 큐로 간다. worker는 지금처럼 SQL 전체를 다시 파싱하므로 분류는 결과에 영향을 주지 않는다. 큐가 둘이라 대기 메모리 상한은 옵션 값의 두 배(기본 32 MiB)다.
 
 큐 상한은 이미 실행 중인 작업을 제외한다. HTTP 수신 버퍼, JSON 객체, 실행 중인 결과, 응답 전송 버퍼까지 합친 프로세스 전체 메모리 상한은 아니다. SELECT 결과는 보수적인 크기 예산으로 수집하므로 최종 JSON 크기 상한에 도달하기 전에 거절될 수도 있다. 상한을 넘긴 결과를 성공 응답으로 일부만 반환하지 않는다.
 
 HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한도를 초과하면 연결이 종료될 수 있으며, SQL 큐의 `QUEUE_FULL` JSON 응답과는 별개다.
 
-`--queue-timeout-ms`는 실행 중인 SQL을 중단하는 timeout이 아니다. 엔진 lock 대기와 파일 I/O에는 이 시간 제한이 적용되지 않는다.
+`--queue-timeout-ms`는 실행 중인 SQL을 중단하는 timeout이 아니다. INSERT는 쓰기 잠금을 기다리는 동안 만료되더라도 잠금을 얻은 뒤에야 만료를 확인한다(대기를 중간에 끊지 않는다). SELECT의 잠금 대기와 모든 파일 I/O에는 이 시간 제한이 적용되지 않는다.
 
 ## 병렬 처리와 제한
 
@@ -201,6 +204,8 @@ HTTP pipelining은 연결당 16개로 제한한다. 프레임워크의 이 한�
 Thread Pool을 늘리는 것만으로 처리량이 선형 증가하지 않는다. 긴 순차 탐색, 쓰기 비중과 저장 장치가 성능에 영향을 준다. `peak_active`는 worker 활동 수이고, `engine.peak_executions`는 C executor(`executor_run`, `executor_run_read`)의 동시 진입 수다. 어느 값도 단독으로 속도 향상을 증명하지 않는다.
 
 `/metrics`의 `engine.lock_wait`는 `reader_mutex`, `read_gate`, `write_gate`별 `count`, `total_us`, `max_us`를 제공한다. count는 경합 여부와 무관한 성공 획득 횟수이며 시간은 잠금 보유 시간을 제외한다. 기존 `engine.lock_wait_us`는 전체 합계로 유지한다. 요청 p95/p99는 이 합계에서 계산할 수 없으며, [부하 생성기](benchmarks/README.md)로 클라이언트 지연을 측정한다.
+
+`/metrics`의 `pool`은 두 큐의 합계다(`peak_active`는 각 큐 최댓값의 합, `max_queue_wait_us`는 둘 중 큰 값). 큐별 값은 `pools.read`, `pools.write`에 같은 필드로 있다. `expired`도 큐별로 센다.
 
 `/metrics`의 `request_kinds`는 worker가 처리한 요청을 `insert`, `select`, `other`로 나눠 `count`, `queue_wait_us`(큐 대기 합계), `max_queue_wait_us`, `total_us`(큐 진입부터 응답을 HTTP 루프에 넘길 때까지의 합계)를 제공한다. 종류는 worker가 SQL을 파싱한 뒤에 정해진다. 큐에서 만료된 요청, 파싱 실패, 처리 중 예외는 `other`다. 큐에 들어가지 못한 요청(`QUEUE_FULL` 등)은 세지 않는다.
 

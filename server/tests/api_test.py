@@ -196,7 +196,7 @@ class ApiTest(unittest.TestCase):
                 self.assertEqual(sum(d["count"] for d in kinds.values()), metrics["pool"]["completed"])
                 # Classified by first keyword: the broken SELECT still went to the read queue.
                 pools = metrics["pools"]
-                self.assertEqual((pools["read"]["workers"], pools["write"]["workers"]), (4, 1))
+                self.assertEqual((pools["read"]["workers"], pools["write"]["workers"]), (4, 2))
                 self.assertEqual((pools["read"]["accepted"], pools["write"]["accepted"]), (3, 2))
                 for field in ("workers", "accepted", "completed", "queue_wait_us", "expired"):
                     self.assertEqual(metrics["pool"][field], pools["read"][field] + pools["write"][field])

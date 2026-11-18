@@ -32,6 +32,12 @@ python3 server/benchmarks/run.py --binary build/server/minidb_server \
 
 `--old-binary`로 다른 커밋에서 빌드한 서버를 같은 실행 안에서 번갈아 측정할 수 있다. 예를 들어 인덱스 복제 구조(`1477e83`)와 단일 인덱스 구조를 `--scenarios scan_write --workers 1 8`로 비교했다. 결과는 `minimal-report.md` B4 절에 있다. 인덱스 복제 구조의 결과에만 `engine.fallbacks` 계열 지표가 있으며, `report.py`는 그 지표가 있을 때만 검사한다.
 
+`--variant NAME=ARGS`는 `--binary` 서버를 서버 옵션만 바꿔 한 번 더 측정한다(여러 번 줄 수 있음). 예: `--variant "ww2=--write-workers 2"`. 다른 변형과 번갈아 실행된다.
+
+`bulk90` 부하는 요청의 90%가 100행 INSERT, 10%가 ID 단건 조회다. 단일 행 INSERT로는 이 부하 생성기가 서버보다 먼저 한계에 닿아 큐가 쌓이지 않으므로, 쓰기 과부하 조건을 만들 때 쓴다. 초당 약 100만 행이 쌓이고 클라이언트가 확인용 ID를 모두 메모리에 들고 있으므로 측정 시간을 짧게(5초 정도) 둔다.
+
+`digest.py <결과 디렉터리>...`는 조건마다 처리량, 종류별 지연·오류, 서버의 종류별 큐 대기 비중(`request_kinds`), gate 평균 대기를 한 줄 JSON으로 출력한다.
+
 ## 결과 해석
 
 - 기본 fixture는 ID가 짝수인 100만 행이다. 없는 ID는 gap/음수/0/미래 ID로 나누고, 스캔은 파일 전체를 읽되 마지막 행에만 일치하는 age 조건을 사용한다.

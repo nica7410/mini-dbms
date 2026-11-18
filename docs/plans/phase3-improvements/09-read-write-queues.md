@@ -2,7 +2,7 @@
 
 작성일: 2026-11-17  
 기준 커밋: `82222b7`  
-상태: 0단계 완료(2026-11-17). P1·P3·P4가 판정 규칙을 충족했다. 결과는 [10절](#10-0단계-결과-2026-11-17)에 있다. 1단계 설계 확정은 사용자 확인을 기다린다.
+상태: 완료(2026-11-17). 구현 `5a4c2e7`, 쓰기 worker 기본값 2로 채택. 결과와 결정은 [11절](#11-14단계-결과-2026-11-17)에 있다.
 
 ## 1. 지금 구조
 
@@ -250,6 +250,104 @@ $R --scenarios bulk90 --rates 18600 --clients 384 --duration 5 --warmup 2 --outp
 $R --scenarios scan_write --output rwq-stage0/s3
 python3 server/benchmarks/digest.py rwq-stage0/s1 rwq-stage0/s2 rwq-stage0/s3
 ```
+
+## 11. 1~4단계 결과 (2026-11-17)
+
+### 1단계: 설계 확정
+사용자가 권장안(D1~D7)으로 전체 구현을 승인했다. D2는 기본 쓰기 worker 1개였다. 아래 4단계 결과 때문에 이 기본값은 다시 정해야 한다.
+
+### 2~3단계: 구현과 테스트 — 커밋 `5a4c2e7`
+
+| 파일 | 변경 |
+|---|---|
+| `src/parser.c`, `parser.h` | `parser_peek_kind`: 첫 토큰만 읽어 INSERT/SELECT를 돌려준다. lexer를 그대로 쓰므로 공백·주석·대소문자 규칙이 파서와 같다 |
+| `server/main.cpp` | 읽기·쓰기 `ThreadPool` 두 개. 첫 키워드가 INSERT면 쓰기 큐, 나머지는 읽기 큐. `--write-workers`. 엔진 reader 수 = 읽기 + 쓰기 worker. 쓰기 worker 번호는 읽기 worker 뒤에서 시작. `/metrics`의 `pool`은 합계, `pools.read`·`pools.write` 추가, `expired`는 큐별 |
+| `server/engine.*` | `execute`에 마감 시각 인자(기본값은 무제한이라 기존 호출은 그대로). INSERT는 배타 gate를 얻은 뒤 마감을 넘었으면 쓰지 않고 `QueryStatus::Expired`. 서버는 이를 `QUEUE_TIMEOUT`·`not_started`로 응답 |
+| 테스트 | C 단위 `test_parse_peek_kind`, 엔진 `test_insert_deadline_is_checked_after_the_gate`, API 지표 검사 확장, 제어 API 4개(아래) |
+
+제어 API 테스트:
+- `test_sigterm_drains_a_confirmed_pending_queue` **(수정)**: 기다리는 위치가 공유 큐에서 "쓰기 worker 1개는 gate 앞, 2개는 쓰기 큐"로 바뀌었다. 수락한 INSERT 3개가 모두 저장되는 계약은 같다.
+- `test_insert_expiry_at_the_write_lock_and_in_the_queue` **(기존 만료 테스트를 대체)**: gate 앞에서 만료된 INSERT와 쓰기 큐에서 만료된 INSERT가 둘 다 `QUEUE_TIMEOUT`·`not_started`이고 아무것도 기록되지 않는다. write gate 획득은 1번뿐이다.
+- `test_insert_skips_queued_scans` (추가): 읽기 worker 1개가 스캔에 붙잡혀 있고 스캔 2개가 읽기 큐에 있을 때, INSERT는 쌓인 스캔보다 먼저 실행된다(쌓인 스캔이 새 행을 본다).
+- `test_full_write_queue_does_not_reject_selects` (추가): 쓰기 큐가 가득 차 INSERT가 `QUEUE_FULL`을 받는 동안에도 SELECT는 수락된다.
+
+검증(모두 컨테이너, 0단계와 같은 이미지):
+
+| 검사 | 결과 |
+|---|---|
+| `make test` | PASS. 단위 34,560건 검사 0 실패, CLI 30개 0 실패 |
+| Release `ctest` (`MINIDB_BUILD_BENCHMARKS=ON`) | 6/6 PASS. 비교 타깃 `minidb_server_serial`·`_fair`도 함께 빌드됨 |
+| 제어 API 테스트 30회 반복 | 30/30 PASS |
+| TSan (`seccomp=unconfined` + `setarch -R`) gate·engine·engine_gate·pool | 4개 모두 exit 0, 경고 0건 |
+| 프로젝트 코드 컴파일 경고 | 0건 (Drogon 내부 경고만 있음) |
+
+### 4단계: 변경 전후 측정
+
+변경 전 `dd52ceb`(old)와 변경 후 `5a4c2e7`를 같은 실행에서 번갈아 쟀다. 읽기 worker 8, 반복 3회. ww1·ww2·ww4는 변경 후 서버의 `--write-workers` 값이다. 조건은 0단계와 같다. 원시 결과는 [rwq-stage4/](../../phase3-benchmarks/20261117/rwq-stage4), 요약은 [digest.jsonl](../../phase3-benchmarks/20261117/rwq-stage4/digest.jsonl)이다. 값은 r0 / r1 / r2 범위다.
+
+**S1. `write99` 고정 동시성**
+
+| 지표 | old | ww1 | ww2 |
+|---|---|---|---|
+| 처리량 RPS | 31,343–31,421 | 34,233–35,623 | **38,551–39,954** |
+| 읽기 p99 | 17.6–18.0 ms | 1.30–1.42 ms | 1.41–1.46 ms |
+| 쓰기 p99 | 1.84–1.92 ms | 1.54–1.63 ms | **1.40–1.47 ms** |
+| read gate 평균 대기 | 1.49–1.82 ms | 0.007–0.015 ms | 0.038–0.040 ms |
+
+**S2. `bulk90` 고정 도착률 18,600 RPS, 연결 384, 5초**
+
+| 지표 | old | ww1 | ww2 |
+|---|---|---|---|
+| 처리량 RPS | 16,047–16,603 | 14,240–14,592 | 15,584–16,785 |
+| 성공 INSERT 수 | 83,080–83,448 | **67,079–67,406 (−19%)** | 83,446–83,663 |
+| 읽기 p99 | 23.9–25.2 ms | 0.93–0.98 ms | 1.75–1.91 ms |
+| SELECT `QUEUE_FULL` | 56–148건 | **0건** | **0건** |
+| 쓰기 p99 | 16.8–17.4 ms | **31.5–32.0 ms** | 17.2–19.2 ms |
+| INSERT `QUEUE_FULL` | 299–828건 | 16,242–16,829건 | 98–301건 |
+
+**S3. `scan_write` 고정 동시성.** ww1은 두 번 쟀다(old와 번갈아 1회, ww2·ww4와 번갈아 1회).
+
+| 지표 | old | ww1 | ww2 | ww4 |
+|---|---|---|---|---|
+| 처리량 RPS | 97.4–100.0 | 99.8–101.1 | 99.6–101.3 | 100.5–101.0 |
+| INSERT p99 | 362–380 ms | **722–1,698 ms** | **94–96 ms** | 94–95 ms |
+| INSERT 서버 시간 중 큐 대기 | 238–245 ms | 206–669 ms | 2.6–3.1 ms | 0.05–0.11 ms |
+| write gate 평균 대기 | 43–46 ms | 84–87 ms | 55–59 ms | 56–61 ms |
+| 스캔 p50 | 323–329 ms | 272–333 ms | 344–347 ms | 343–346 ms |
+| 스캔 p99 | 406–416 ms | 401–427 ms | **434–436 ms (+5%)** | 426–436 ms |
+
+정확성 오류와 확인한 INSERT 유실은 전 조건 0건, 만료 0건이다.
+
+### 해석
+
+- **읽기 쪽은 목표대로 개선됐다.** 쓰기 과부하(S2)에서 SELECT는 더 이상 INSERT 뒤에 줄 서지 않는다(읽기 p99 약 25 → 1–2ms, SELECT `QUEUE_FULL` 0건). 쓰기 99%(S1)에서도 읽기 p99가 약 18 → 1.4ms다.
+- **S1의 읽기 개선은 gate 대기 감소에서 왔다.** read gate 평균 대기가 약 1.6ms에서 0.01–0.04ms가 됐다. gate 앞에서 기다리는 writer가 최대 8개에서 1~2개로 줄어 reader가 들어갈 틈이 생겼다(5절 D2의 부수 효과). 0단계에서 따로 구분하지 못한 P2가 실제로 있었다는 뜻이다. gate 정책은 바꾸지 않았다.
+- **ww1은 쓰기에서 퇴행한다.** 
+  - S2: 100행 INSERT의 파싱이 worker 하나에서 직렬로 일어나 쓰기 처리량이 19% 줄었다.
+  - S3: INSERT마다 실행 중 스캔이 빠질 때까지(평균 약 85ms) gate 앞에서 기다린다. 그동안 쓰기 worker가 하나뿐이라 다음 INSERT가 쓰기 큐에서 기다린다. 도착(초당 약 10건)이 처리 능력(초당 약 12건)에 가까워 큐가 길어졌다. 변경 전에는 worker 8개가 함께 gate 앞에서 기다리다 한 번의 쓰기 구간에 연달아 처리됐다.
+- **ww2는 세 조건 모두에서 변경 전보다 같거나 낫다. 예외는 S3 스캔 지연 약 5% 증가다.** INSERT가 큐 대신 gate 앞에서만 기다리므로 쓰기 구간이 더 자주 생기고, 그만큼 스캔이 조금 더 밀린다. 처리량은 같다.
+- ww4는 ww2와 반복 변동 안에서 같다. 2개를 넘겨 얻는 것은 없었다.
+- 처리량 참고: B5에서 "부하 생성기 상한"으로 본 약 3.3만 RPS를 ww2가 넘었다(약 3.9만). 그때의 상한 판단은 생성기가 아니라 서버 쪽 대기였을 수 있다.
+
+### 판정
+
+계획의 규칙("개선과 악화가 함께 나오면 자동으로 채택하지 않는다")에 따라 사용자에게 결정을 요청한다.
+- 기본값 ww1(1단계 결정): S2 쓰기 처리량 −19%, S3 INSERT p99 2–4배 악화. **채택 기준 미충족.**
+- 기본값 ww2: 확인된 문제(P1·P2·P3·P4) 지표가 모두 반복 변동을 넘어 개선. 처리량과 쓰기 지연은 나빠지지 않음. 악화는 S3 스캔 p50·p99 약 5% 하나.
+
+**결정 (2026-11-18, 사용자):** 쓰기 worker 기본값을 **2**로 채택한다. 1단계 D2의 "기본 1개"를 이 측정 결과로 바꾼다. 스캔 지연 약 5% 증가는 알려진 비용으로 기록한다. ww2는 세 조건을 모두 이미 측정했으므로 추가 측정은 하지 않았다. 기본값 변경 뒤 Release `ctest`를 다시 실행했다(아래 5단계).
+
+### 5단계: 문서
+- [`server/README.md`](../../../server/README.md): `--write-workers`(기본 2), 큐별 상한과 대기 메모리 2배, 분류 규칙, `QUEUE_TIMEOUT`의 두 검사 시점, `pool`·`pools.*` 지표.
+- [`docs/implementation-phase3.md`](../../implementation-phase3.md): 요청 흐름 그림, 5절 큐·만료·종료, 7절 계측 표, 쓰기 worker 기본값 2의 근거.
+- [`server/benchmarks/README.md`](../../../server/benchmarks/README.md): `--variant`, `bulk90`, `digest.py`.
+- 루트 [`README.md`](../../../README.md): Phase 3 측정 요약과 알려진 한계.
+
+남은 한계:
+- 쓰기 우선 gate 정책은 그대로다. 실행 중인 스캔이 끝날 때까지 INSERT가 기다리는 것(S3 write gate 평균 약 57ms)은 남아 있다.
+- 읽기 큐 안에서 스캔끼리의 대기(S3 스캔 서버 시간의 약 70%)는 큐 분리 대상이 아니다.
+- 쓰기 과부하 시 INSERT는 여전히 `QUEUE_FULL`을 받는다. 쓰기 큐가 따로 있어 SELECT에 번지지 않을 뿐이다.
+- 측정은 worker 8 하나만 했다. worker 1·2·4에서의 효과는 재지 않았다.
 
 ## 완료 기준
 

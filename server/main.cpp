@@ -135,7 +135,9 @@ struct Options {
     std::string host = "127.0.0.1";
     std::size_t port = 8080;
     std::size_t workers = 4;
-    std::size_t write_workers = 1;
+    // Two, not one: with a single write worker each INSERT waits alone for running
+    // scans to drain and the next one queues behind it (plan 09, section 11).
+    std::size_t write_workers = 2;
     std::size_t io_threads = 2;
     std::size_t queue_capacity = 256;
     std::size_t queue_bytes = 16 * 1024 * 1024;
@@ -154,7 +156,7 @@ void usage() {
         << "  --host ADDRESS          Listen address (127.0.0.1)\n"
         << "  --port N                TCP port (8080)\n"
         << "  --workers N             Read SQL workers (4)\n"
-        << "  --write-workers N       INSERT workers (1)\n"
+        << "  --write-workers N       INSERT workers (2)\n"
         << "  --io-threads N          HTTP event loops (2)\n"
         << "  --queue-capacity N      Maximum waiting SQL tasks, per queue (256)\n"
         << "  --queue-bytes N         Maximum waiting request bytes, per queue (16777216)\n"

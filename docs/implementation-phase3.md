@@ -33,9 +33,13 @@ C 엔진에는 서버의 병렬 조회를 위해 읽기 함수만 추가했다([
 flowchart TD
     Client["HTTP 클라이언트"] --> HTTP["Drogon I/O threads"]
     HTTP --> Validate["UTF-8·JSON·크기 검사"]
-    Validate --> Queue["작업 수·바이트가 제한된 큐"]
-    Queue --> Workers["고정 SQL workers"]
-    Workers --> Parse["기존 C Parser"]
+    Validate --> Classify["첫 키워드로 분류"]
+    Classify -->|INSERT| WQueue["쓰기 큐"]
+    Classify -->|그 밖| RQueue["읽기 큐"]
+    WQueue --> WWorkers["쓰기 worker (기본 2)"]
+    RQueue --> RWorkers["읽기 worker (--workers)"]
+    WWorkers --> Parse["기존 C Parser"]
+    RWorkers --> Parse
     Parse --> Gate["C++ 동시성 제어"]
     Gate --> Readers["SELECT: worker별 TableReader(파일 핸들)"]
     Gate --> Writer["INSERT: 공유 Table"]
@@ -128,13 +132,23 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 
 수락 시점에 대기 작업 수와 원본 JSON 본문 바이트 합을 확인한다. 이미 실행 중인 작업은 이 큐 예산에서 제외한다. `try_submit`은 빈자리가 생기기를 기다리지 않고 `Accepted`, `Full`, `Stopped` 중 하나를 반환한다.
 
-작업 수락 실패는 HTTP 503으로 응답한다. worker가 작업을 시작할 때 대기 만료를 검사하며, 만료되면 C 엔진에 진입하지 않는다. 이 검사는 엔진 lock 대기와 실행 중인 파일 I/O를 중단하지 않는다.
+큐는 읽기·쓰기 두 개다. HTTP handler가 `parser_peek_kind`로 SQL의 첫 키워드만 읽어, `INSERT`면 쓰기 큐에, 나머지는 모두 읽기 큐에 넣는다. 각 큐는 같은 `ThreadPool` 클래스이고 상한 옵션을 따로 적용한다. 쓰기 worker는 엔진 worker 번호를 읽기 worker 뒤에서부터 쓰며, 자기 `TableReader`도 가진다. 그래서 잘못 분류된 SELECT도 쓰기 worker에서 정상 실행된다.
+
+나눈 이유는 [계획 09의 0단계 측정](plans/phase3-improvements/09-read-write-queues.md#10-0단계-결과-2026-11-17)이다. 큐가 하나일 때 쓰기 과부하에서는 SELECT가 INSERT 뒤에 줄을 서서 큐 대기가 SELECT 서버 시간의 72–75%였고, SELECT도 `QUEUE_FULL`을 받았다. 스캔 혼합 부하에서는 INSERT가 큐에 먼저 들어온 스캔까지 기다려 서버 시간의 85%가 큐 대기였다.
+
+쓰기 worker 기본값은 2다. INSERT는 배타 gate에서 어차피 하나씩 실행되므로 처음에는 1로 정했지만, 측정에서 두 가지 문제가 나왔다([계획 09의 11절](plans/phase3-improvements/09-read-write-queues.md#11-14단계-결과-2026-11-17)).
+- 스캔 혼합 부하에서 INSERT마다 실행 중 스캔이 빠질 때까지(평균 약 85ms) 혼자 기다리고, 그동안 다음 INSERT가 쓰기 큐에서 기다렸다. INSERT p99가 약 0.37초에서 0.7–1.7초로 늘었다.
+- 100행 INSERT 과부하에서 파싱이 worker 하나에 몰려 쓰기 처리량이 19% 줄었다.
+
+2개면 한 INSERT가 gate를 기다리는 동안 다른 하나가 파싱하고 gate 앞에 줄 설 수 있다. 4개로 늘려도 더 나아지지 않았다. gate 앞에서 기다리는 writer가 최대 2개로 줄어든 효과로, 쓰기 99% 부하의 read gate 평균 대기가 약 1.6ms에서 0.04ms로 줄었다.
+
+작업 수락 실패는 HTTP 503으로 응답한다. worker가 작업을 꺼낼 때 대기 만료를 검사하며, 만료되면 C 엔진에 진입하지 않는다. INSERT는 배타 gate를 얻은 뒤 한 번 더 검사한다. 쓰기 worker가 INSERT를 바로 꺼낸 뒤 gate 앞에서 기다리므로, 꺼낼 때만 검사하면 대기가 만료 대상에서 빠지기 때문이다. 만료된 INSERT는 아무것도 기록하지 않고 `QUEUE_TIMEOUT`(`not_started`)으로 끝난다. 이 검사들은 gate 대기 자체를 중간에 끊거나 실행 중인 파일 I/O를 중단하지 않는다.
 
 정상 종료 순서는 다음과 같다.
 
 1. 신호 handler는 종료 요청 flag만 설정한다.
 2. event loop가 종료 요청을 감지하여 신규 작업을 거절한다.
-3. main event loop에서 pool의 수락을 막고 기존 작업을 drain한 뒤 worker를 join한다. 별도 HTTP I/O loop들은 이 동안 응답 callback을 처리할 수 있다.
+3. main event loop에서 읽기·쓰기 pool의 수락을 차례로 막고 각각 기존 작업을 drain한 뒤 worker를 join한다. 별도 HTTP I/O loop들은 이 동안 응답 callback을 처리할 수 있다.
 4. event loop를 종료하고 DB 컨텍스트를 해제한다.
 
 수락한 작업은 실행 또는 만료 처리로 끝나지만, 클라이언트가 최종 응답을 수신한다는 보장은 없다. 이미 적용한 INSERT를 연결 종료 때문에 rollback하지 않는다. 무한정 걸리는 엔진 작업을 강제로 중단하거나 종료 시간을 상한으로 묶는 기능도 없다.
@@ -153,13 +167,15 @@ Thread Pool은 worker를 처음에 만들고 요청마다 새 thread를 만들�
 
 | 계측 | 해석 |
 |---|---|
+| `pool.*` | 아래 항목 모두 읽기·쓰기 두 큐의 합계다. 큐별 값은 같은 이름으로 `pools.read.*`, `pools.write.*`에 있다 |
 | `pool.queued`, `queued_bytes` | 현재 대기열의 작업 수·회계 바이트 |
 | `pool.active`, `peak_active` | 작업을 가져간 worker 수. 엔진 lock 대기도 포함 |
 | `pool.accepted`, `completed`, `rejected` | 수락·처리 종료·수락 거절 작업 수 |
 | `pool.failed_tasks` | 작업 callback에서 밖으로 나온 예외를 pool이 포착한 수. `completed`에도 포함 |
 | `pool.queue_wait_us`, `max_queue_wait_us` | enqueue에서 worker가 가져갈 때까지의 누적·최대 대기 |
-| `pool.expired` | worker의 실행 전 만료 검사에서 끝난 작업 수 |
-| `engine.requests` | adapter의 `execute` 호출 수. 만료된 요청은 포함하지 않음 |
+| `pool.expired` | 실행 전 만료 검사(꺼낼 때, 또는 INSERT의 gate 획득 뒤)에서 끝난 작업 수 |
+| `request_kinds.{insert,select,other}` | worker가 처리한 요청의 종류별 수, 큐 대기 합계·최대, 큐 진입부터 응답까지의 합계 |
+| `engine.requests` | adapter의 `execute` 호출 수. 꺼낼 때 만료된 요청은 포함하지 않는다. gate 획득 뒤 만료된 INSERT는 포함하며 `errors`로 센다 |
 | `engine.successful_inserts`, `successful_selects`, `errors` | 엔진 adapter 처리 결과. 문장 단위로 센다(여러 행 INSERT도 1). 일부만 기록된 INSERT는 `errors`로 센다 |
 | `engine.current_executions`, `peak_executions` | C executor 호출(`executor_run`, `executor_run_read`) 범위의 현재·최대 중첩 수 |
 | `engine.lock_wait_us` | reader mutex와 gate의 누적 대기 |
